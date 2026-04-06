@@ -1,0 +1,20 @@
+services:
+  ira-memory-db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    ports:
+      - "5433:5432"
+    volumes:
+      - ira-memory-db-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ira_memory
+      POSTGRES_USER: ira_memory
+      POSTGRES_PASSWORD: ira_memory_secret
+    healthcheck:
+      test: pg_isready -U ira_memory -d ira_memory
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  ira-memory-db-data:

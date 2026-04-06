@@ -22,11 +22,9 @@ Assistant (IRA / OpenClaw)
 
 ```bash
 # 1. Start the database
-cd /home/hus/golden-claw-workspace/orchestrator/infrastructure
-docker compose up ira-memory-db -d
+docker compose up -d
 
 # 2. Install dependencies
-cd /home/hus/golden-claw-workspace/orchestrator/projects/ira-memory
 bun install
 
 # 3. Run migrations (first time only)
@@ -256,7 +254,7 @@ Rollback at any phase: files are never modified or deleted.
 
 ## Infrastructure
 
-The database is a Docker container defined in `infrastructure/docker-compose.yml`:
+The database is a Docker container defined in `docker-compose.yml`:
 
 - **Image:** `pgvector/pgvector:pg16` (PostgreSQL 16 + pgvector extension)
 - **Port:** 5433 (mapped from container 5432)
