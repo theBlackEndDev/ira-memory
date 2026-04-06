@@ -1,0 +1,23 @@
+{
+  "name": "ira-memory",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "bun run src/cli.ts",
+    "db:migrate": "bunx prisma migrate dev",
+    "db:push": "bunx prisma db push",
+    "db:generate": "bunx prisma generate",
+    "db:studio": "bunx prisma studio",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.7.0",
+    "openai": "^6.33.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "prisma": "^6.7.0",
+    "typescript": "^5.7.0"
+  }
+}

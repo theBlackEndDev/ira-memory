@@ -1,0 +1,204 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("MEMORY_DATABASE_URL")
+  extensions = [vector, pg_trgm]
+}
+
+// ─── SESSIONS ───────────────────────────────────────────────────
+
+model Session {
+  id        String    @id @default(cuid())
+  channel   String // "cli" | "discord" | "webchat" | "telegram" | "api"
+  agentId   String?   @map("agent_id")
+  hostId    String?   @map("host_id")
+  title     String?
+  metadata  Json?
+  parentSessionId String? @map("parent_session_id")
+  startedAt       DateTime  @default(now()) @map("started_at")
+  endedAt         DateTime? @map("ended_at")
+
+  messages Message[]
+  summaries Summary[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([channel])
+  @@index([startedAt(sort: Desc)])
+  @@map("sessions")
+}
+
+// ─── MESSAGES ───────────────────────────────────────────────────
+
+model Message {
+  id         String  @id @default(cuid())
+  sessionId  String  @map("session_id")
+  role       String // "user" | "assistant" | "system" | "tool"
+  content    String  @db.Text
+  toolName   String? @map("tool_name")
+  toolInput  Json?   @map("tool_input")
+  toolOutput Json?   @map("tool_output")
+  tokenCount Int?    @map("token_count")
+  model      String?
+  costUsd    Float?  @map("cost_usd")
+  metadata   Json?
+
+  session   Session           @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  embedding MessageEmbedding?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([sessionId, createdAt])
+  @@index([createdAt(sort: Desc)])
+  @@map("messages")
+}
+
+// ─── MEMORY FACTS ───────────────────────────────────────────────
+
+model MemoryFact {
+  id           String         @id @default(cuid())
+  category     MemoryCategory
+  tier         MemoryTier     @default(SHORT_TERM)
+  content      String         @db.Text
+  source       String? // "explicit" | "inferred" | "imported"
+  sourceRef    String?        @map("source_ref")
+  confidence   Float          @default(1.0)
+  tags         String[]
+  isSensitive  Boolean        @default(false) @map("is_sensitive")
+  isArchived   Boolean        @default(false) @map("is_archived")
+  supersededBy String?        @map("superseded_by")
+  expiresAt    DateTime?      @map("expires_at")
+  metadata     Json?
+  learningType LearningType?  @map("learning_type")
+  provenance   String?        // "learned" | "discovered" | "synthesized"
+
+  embedding FactEmbedding?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([category])
+  @@index([tier])
+  @@index([isArchived])
+  @@index([tags], type: Gin)
+  @@index([createdAt(sort: Desc)])
+  @@index([learningType])
+  @@map("memory_facts")
+}
+
+enum MemoryCategory {
+  PREFERENCE
+  DECISION
+  PLAN
+  TODO
+  FACT
+  LESSON
+  CHECKPOINT
+  CONTEXT
+  TOOL_CONFIG
+  PROJECT_STATE
+}
+
+enum MemoryTier {
+  SHORT_TERM
+  DAILY
+  LONG_TERM
+}
+
+enum LearningType {
+  MISTAKE        // Anti-patterns, bugs, failed approaches
+  BEST_PRACTICE  // Patterns that worked well
+  INSTITUTIONAL  // How the codebase/team/project works, unwritten rules
+  WORKFLOW_PREF  // Tool/workflow preferences and configurations
+  CODEBASE_RULE  // Naming conventions, architecture patterns, testing requirements
+}
+
+// ─── SUMMARIES ──────────────────────────────────────────────────
+
+model Summary {
+  id          String       @id @default(cuid())
+  scope       SummaryScope
+  sessionId   String?      @map("session_id")
+  periodStart DateTime     @map("period_start")
+  periodEnd   DateTime     @map("period_end")
+  content     String       @db.Text
+  keyTopics   String[]     @map("key_topics")
+  factIds     String[]     @map("fact_ids")
+  metadata    Json?
+
+  session   Session?         @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  embedding SummaryEmbedding?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([scope])
+  @@index([periodStart(sort: Desc)])
+  @@map("summaries")
+}
+
+enum SummaryScope {
+  SESSION
+  DAILY
+  WEEKLY
+  PROJECT
+}
+
+// ─── EMBEDDINGS ─────────────────────────────────────────────────
+// Separate tables: Prisma 6 can't query Unsupported types inline.
+// All vector queries go through $queryRaw.
+
+model MessageEmbedding {
+  id        String                        @id @default(cuid())
+  messageId String                        @unique @map("message_id")
+  vector    Unsupported("vector(1536)")
+  model     String                        @default("text-embedding-3-small")
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("message_embeddings")
+}
+
+model FactEmbedding {
+  id     String                        @id @default(cuid())
+  factId String                        @unique @map("fact_id")
+  vector Unsupported("vector(1536)")
+  model  String                        @default("text-embedding-3-small")
+
+  fact MemoryFact @relation(fields: [factId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("fact_embeddings")
+}
+
+model SummaryEmbedding {
+  id        String                        @id @default(cuid())
+  summaryId String                        @unique @map("summary_id")
+  vector    Unsupported("vector(1536)")
+  model     String                        @default("text-embedding-3-small")
+
+  summary Summary @relation(fields: [summaryId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("summary_embeddings")
+}
+
+// ─── FILE SYNC TRACKING ─────────────────────────────────────────
+
+model FileSyncRecord {
+  id       String   @id @default(cuid())
+  filePath String   @unique @map("file_path")
+  fileHash String   @map("file_hash")
+  syncedAt DateTime @default(now()) @map("synced_at")
+  factCount Int     @default(0) @map("fact_count")
+
+  @@map("file_sync_records")
+}
