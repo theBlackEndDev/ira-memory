@@ -38,6 +38,42 @@ bunx prisma migrate dev
 bun run src/cli.ts stats
 ```
 
+## Claude Code Session Capture
+
+Automatically capture all your Claude Code conversations into ira-memory.
+
+### Install
+
+```bash
+bun run src/cli.ts install-hooks
+```
+
+This adds a `SessionEnd` hook to `~/.claude/settings.json`. Every time a Claude Code session ends, the full transcript is parsed and stored — including user prompts, assistant responses, session metadata, and auto-generated summaries.
+
+### What gets captured
+
+- All user and assistant messages (tool calls are excluded to reduce noise)
+- Session metadata: working directory, timestamp, CC session ID
+- Auto-generated summary via LLM on session close
+- Auto-extracted learnings (decisions, mistakes, best practices)
+
+### Manual capture
+
+Import a specific transcript file:
+
+```bash
+bun run src/cli.ts capture --transcript ~/.claude/sessions/<id>/transcript.jsonl
+```
+
+### Verify
+
+After a Claude Code session ends:
+
+```bash
+bun run src/cli.ts stats      # Check message/session counts
+bun run src/cli.ts sessions    # List captured sessions
+```
+
 ## Configuration
 
 All config lives in `.env`:
@@ -229,7 +265,8 @@ ira-memory/
 │   ├── maintain.ts            Tier promotion, expiration, conflict detection, compaction
 │   ├── export.ts              JSON/markdown export, pg_dump backup/restore, sensitive detection
 │   ├── import.ts              File-based memory parser (MEMORY.md, daily/*.md)
-│   ├── cli.ts                 CLI interface (20 commands)
+│   ├── cli.ts                 CLI interface (22 commands)
+│   ├── cc-capture.ts          Claude Code session capture hook
 │   ├── test-e2e.ts            End-to-end test suite (28 assertions)
 │   └── test-flow.ts           Integration smoke test
 ├── backups/                   pg_dump backup files

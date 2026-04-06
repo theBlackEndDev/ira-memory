@@ -72,6 +72,8 @@ async function main() {
     case "learn":      return cmdLearn(subArgs);
     case "discover":   return cmdDiscover(subArgs);
     case "synthesize": return cmdSynthesize(subArgs);
+    case "install-hooks": return cmdInstallHooks();
+    case "capture":    return cmdCapture(subArgs);
     default:           printUsage();
   }
 }
@@ -107,6 +109,9 @@ Commands:
   learn     --session ID [--types T1,T2] [--dedup]         Extract learnings from a session
   discover  <directory> [--aspects A1,A2] [--project NAME]  Mine knowledge from source code
   synthesize <question> [--save] [--categories C1,C2]      Synthesize knowledge from memory
+
+  install-hooks                                            Install Claude Code session capture hooks
+  capture   --transcript PATH [--session-id ID]            Manually capture a CC transcript
 
 Categories: ${CATEGORIES.join(", ")}
 Tiers: ${TIERS.join(", ")}
@@ -296,9 +301,9 @@ async function cmdImport(args: string[]) {
     strict: false,
   });
 
-  const orchestratorRoot = "/home/hus/golden-claw-workspace/orchestrator";
-  const memoryMdPath = values["memory-md"] ?? `${orchestratorRoot}/MEMORY.md`;
-  const dailyDir = values["daily-dir"] ?? `${orchestratorRoot}/memory`;
+  const homeDir = process.env.HOME || process.env.USERPROFILE || "~";
+  const memoryMdPath = values["memory-md"] ?? `${homeDir}/.claude/MEMORY.md`;
+  const dailyDir = values["daily-dir"] ?? `${homeDir}/.claude/memory`;
 
   console.log(`Importing from:`);
   console.log(`  MEMORY.md: ${memoryMdPath}`);
@@ -797,6 +802,108 @@ async function cmdSynthesize(args: string[]) {
   if (result.savedFact) {
     console.log(`\n  Saved as fact: ${result.savedFact.id}`);
   }
+}
+
+// ─── Claude Code Integration ──────────────────────────────────
+
+async function cmdInstallHooks() {
+  const { existsSync, readFileSync, writeFileSync } = await import("fs");
+  const { resolve, dirname } = await import("path");
+  const { execSync } = await import("child_process");
+
+  // Resolve the absolute path to cc-capture.ts
+  const projectRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
+  const capturePath = resolve(projectRoot, "src/cc-capture.ts");
+
+  if (!existsSync(capturePath)) {
+    console.error(`Cannot find cc-capture.ts at: ${capturePath}`);
+    process.exit(1);
+  }
+
+  // Find Claude Code settings
+  const homeDir = process.env.HOME || process.env.USERPROFILE || "~";
+  const settingsPath = resolve(homeDir, ".claude/settings.json");
+
+  let settings: Record<string, any> = {};
+  if (existsSync(settingsPath)) {
+    try {
+      settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    } catch {
+      console.error(`Could not parse ${settingsPath}. Please fix it manually.`);
+      process.exit(1);
+    }
+  }
+
+  // Build the hook command
+  const hookCommand = `bun run ${capturePath}`;
+
+  // Ensure hooks structure exists
+  if (!settings.hooks) settings.hooks = {};
+
+  // Add SessionEnd hook
+  const sessionEndHooks = settings.hooks.SessionEnd || [];
+  const alreadyInstalled = sessionEndHooks.some(
+    (entry: any) =>
+      entry.hooks?.some((h: any) => h.command?.includes("cc-capture"))
+  );
+
+  if (alreadyInstalled) {
+    console.log("Claude Code session capture hook is already installed.");
+    console.log(`Settings file: ${settingsPath}`);
+    return;
+  }
+
+  sessionEndHooks.push({
+    matcher: "",
+    hooks: [
+      {
+        type: "command",
+        command: hookCommand,
+        timeout: 30000,
+      },
+    ],
+  });
+
+  settings.hooks.SessionEnd = sessionEndHooks;
+
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+
+  console.log("Claude Code session capture hook installed!\n");
+  console.log(`  Settings: ${settingsPath}`);
+  console.log(`  Hook:     SessionEnd -> ${hookCommand}`);
+  console.log(`\nEvery Claude Code session will now be captured to ira-memory.`);
+  console.log(`Run 'bun run src/cli.ts stats' after a session to verify.`);
+}
+
+async function cmdCapture(args: string[]) {
+  const { values } = parseArgs({
+    args,
+    options: {
+      transcript: { type: "string" },
+      "session-id": { type: "string" },
+    },
+    strict: false,
+  });
+
+  if (!values.transcript) {
+    console.error("Usage: capture --transcript /path/to/transcript.jsonl [--session-id ID]");
+    process.exit(1);
+  }
+
+  // Delegate to cc-capture.ts
+  const { execSync } = await import("child_process");
+  const { resolve, dirname } = await import("path");
+  const projectRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
+  const capturePath = resolve(projectRoot, "src/cc-capture.ts");
+
+  const captureArgs = [`--transcript`, values.transcript];
+  if (values["session-id"]) {
+    captureArgs.push("--session-id", values["session-id"]);
+  }
+
+  execSync(`bun run ${capturePath} ${captureArgs.join(" ")}`, {
+    stdio: "inherit",
+  });
 }
 
 main()
