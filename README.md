@@ -24,13 +24,17 @@ Assistant (IRA / OpenClaw)
 # 1. Start the database
 docker compose up -d
 
-# 2. Install dependencies
+# 2. Create .env file
+cp .env.example .env
+# Edit .env to add your OPENAI_API_KEY
+
+# 3. Install dependencies
 bun install
 
-# 3. Run migrations (first time only)
+# 4. Run migrations (first time only)
 bunx prisma migrate dev
 
-# 4. Verify
+# 5. Verify
 bun run src/cli.ts stats
 ```
 
