@@ -556,6 +556,19 @@ async function cmdMaintain() {
   console.log(`  SHORT_TERM -> DAILY: ${result.promoted.shortToDaily}`);
   console.log(`  DAILY -> LONG_TERM:  ${result.promoted.dailyToLong}`);
   console.log(`  Expired/archived:    ${result.expired}`);
+
+  // Backfill summaries + learnings for any sessions cc-capture closed
+  // without derived data. Cheap on the LLM side; safe to run every cycle.
+  console.log("\nBackfilling pending session summaries...\n");
+  await cmdSummarizePending([]);
+
+  // Top up any unembedded facts/messages that slipped through the
+  // fire-and-forget write path (e.g. transient Prisma engine hiccups).
+  console.log("\nBackfilling unembedded facts and messages...\n");
+  const facts = await backfillFactEmbeddings(50);
+  const messages = await backfillMessageEmbeddings(50);
+  console.log(`  Facts embedded:    ${facts}`);
+  console.log(`  Messages embedded: ${messages}`);
 }
 
 async function cmdCompact(args: string[]) {
