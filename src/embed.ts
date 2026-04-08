@@ -107,17 +107,41 @@ export async function embedSummary(summaryId: string): Promise<boolean> {
 
 /**
  * Non-blocking embed: fires and forgets. Used in the write path.
+ *
+ * Each pending promise is tracked in `pendingEmbeds` so short-lived
+ * processes (hooks, CLI commands) can `flushPendingEmbeds()` before
+ * calling `prisma.$disconnect()`. Without this, the disconnect races
+ * the unawaited embed calls and they fail with
+ * "Response from the Engine was empty".
  */
+const pendingEmbeds: Set<Promise<unknown>> = new Set();
+
+function track<T>(p: Promise<T>): Promise<T> {
+  pendingEmbeds.add(p);
+  p.finally(() => pendingEmbeds.delete(p));
+  return p;
+}
+
 export function embedMessageAsync(messageId: string): void {
-  embedMessage(messageId).catch(() => {});
+  track(embedMessage(messageId).catch(() => false));
 }
 
 export function embedFactAsync(factId: string): void {
-  embedFact(factId).catch(() => {});
+  track(embedFact(factId).catch(() => false));
 }
 
 export function embedSummaryAsync(summaryId: string): void {
-  embedSummary(summaryId).catch(() => {});
+  track(embedSummary(summaryId).catch(() => false));
+}
+
+/**
+ * Await all in-flight async embed calls. Call this before `prisma.$disconnect()`
+ * in short-lived processes to avoid engine-disconnect races.
+ */
+export async function flushPendingEmbeds(): Promise<void> {
+  while (pendingEmbeds.size > 0) {
+    await Promise.allSettled(Array.from(pendingEmbeds));
+  }
 }
 
 /**

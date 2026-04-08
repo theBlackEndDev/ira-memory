@@ -24,6 +24,7 @@ export {
   embedMessageAsync,
   embedFactAsync,
   embedSummaryAsync,
+  flushPendingEmbeds,
   backfillFactEmbeddings,
   backfillMessageEmbeddings,
   generateEmbedding,

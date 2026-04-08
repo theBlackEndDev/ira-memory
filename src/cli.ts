@@ -834,8 +834,20 @@ async function cmdInstallHooks() {
     }
   }
 
+  // Resolve an absolute path to `bun` — Claude Code spawns hooks with a
+  // minimal PATH that often does not include ~/.bun/bin, so a bare `bun`
+  // silently fails with command-not-found and the hook never captures.
+  let bunPath = "bun";
+  try {
+    bunPath = execSync("command -v bun", { encoding: "utf-8" }).trim() || "bun";
+  } catch {
+    // Fallback to common install location
+    const candidate = resolve(homeDir, ".bun/bin/bun");
+    if (existsSync(candidate)) bunPath = candidate;
+  }
+
   // Build the hook command
-  const hookCommand = `bun run ${capturePath}`;
+  const hookCommand = `${bunPath} run ${capturePath}`;
 
   // Ensure hooks structure exists
   if (!settings.hooks) settings.hooks = {};

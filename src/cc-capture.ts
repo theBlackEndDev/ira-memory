@@ -14,7 +14,18 @@
 
 import { readFileSync } from "fs";
 import { hostname } from "os";
-import { openSession, closeSession, storeMessage, prisma } from "./index.js";
+import { appendFileSync } from "fs";
+import { openSession, closeSession, storeMessage, flushPendingEmbeds, prisma } from "./index.js";
+
+const DEBUG_LOG = "/tmp/ira-cc-capture.log";
+function dlog(msg: string) {
+  try {
+    appendFileSync(DEBUG_LOG, `[${new Date().toISOString()}] ${msg}\n`);
+  } catch {}
+}
+
+// Diagnostic: record every invocation before any parsing so even crashes leave a trace.
+dlog(`invoked pid=${process.pid} argv=${JSON.stringify(process.argv.slice(2))}`);
 
 interface CCHookInput {
   session_id: string;
@@ -62,18 +73,31 @@ async function main() {
     const sidIdx = args.indexOf("--session-id");
     ccSessionId = sidIdx !== -1 ? args[sidIdx + 1] : `manual-${Date.now()}`;
   } else {
-    // Hook mode: read JSON from stdin
-    const input = readFileSync("/dev/stdin", "utf-8").trim();
+    // Hook mode: read JSON from stdin.
+    // Use fd 0 rather than "/dev/stdin" — the latter raises ENXIO in Bun
+    // when the parent process's stdin fd is in certain states (common for
+    // Claude Code hook subprocesses).
+    let input = "";
+    try {
+      input = readFileSync(0, "utf-8").trim();
+    } catch (err) {
+      dlog(`exit: stdin read failed: ${err}`);
+      process.exit(0);
+    }
     if (!input) {
+      dlog("exit: empty stdin");
       process.exit(0);
     }
     const hookInput: CCHookInput = JSON.parse(input);
     ccSessionId = hookInput.session_id;
     transcriptPath = hookInput.transcript_path;
     cwd = hookInput.cwd || cwd;
+    dlog(
+      `hookInput session=${ccSessionId?.slice(0, 8)} reason=${(hookInput as any).reason ?? "?"} event=${hookInput.hook_event_name ?? "?"} transcript=${transcriptPath ?? "<none>"} cwd=${cwd}`
+    );
 
     if (!transcriptPath) {
-      console.error("[cc-capture] No transcript_path in hook input");
+      dlog("exit: no transcript_path in hook input");
       process.exit(0);
     }
   }
@@ -83,7 +107,7 @@ async function main() {
   try {
     transcriptData = readFileSync(transcriptPath, "utf-8");
   } catch (err) {
-    console.error(`[cc-capture] Cannot read transcript: ${err}`);
+    dlog(`exit: cannot read transcript ${transcriptPath}: ${err}`);
     process.exit(0);
   }
 
@@ -133,8 +157,11 @@ async function main() {
     }
   }
 
+  dlog(`parsed transcript: ${lines.length} lines, ${messages.length} user+assistant messages`);
+
   if (messages.length === 0) {
     // Nothing to capture (e.g., empty session or only tool calls)
+    dlog("exit: no user/assistant messages in transcript");
     process.exit(0);
   }
 
@@ -144,7 +171,7 @@ async function main() {
   });
 
   if (existing) {
-    // Already imported
+    dlog(`exit: already imported (session row ${existing.id})`);
     process.exit(0);
   }
 
@@ -190,5 +217,13 @@ async function main() {
 }
 
 main()
-  .catch((err) => console.error(`[cc-capture] Fatal: ${err}`))
-  .finally(() => prisma.$disconnect());
+  .catch((err) => {
+    dlog(`fatal: ${err?.stack ?? err}`);
+    console.error(`[cc-capture] Fatal: ${err}`);
+  })
+  .finally(async () => {
+    // Drain in-flight embed calls before disconnecting the Prisma engine.
+    await flushPendingEmbeds();
+    await prisma.$disconnect();
+    dlog("done");
+  });

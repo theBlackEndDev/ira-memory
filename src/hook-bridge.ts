@@ -18,6 +18,7 @@ import {
   closeSession,
   storeMessage,
   recall,
+  flushPendingEmbeds,
   prisma,
 } from "./index.js";
 
@@ -163,4 +164,7 @@ async function main() {
 
 main()
   .catch((err) => console.error(`[hook-bridge] Fatal: ${err}`))
-  .finally(() => prisma.$disconnect());
+  .finally(async () => {
+    await flushPendingEmbeds();
+    await prisma.$disconnect();
+  });
