@@ -1,6 +1,7 @@
 import { execSync } from "node:child_process";
 import { writeFile, mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { prisma } from "./client.js";
 import type { MemoryFact } from "./types.js";
 
@@ -175,7 +176,11 @@ function formatCategoryName(cat: string): string {
 
 // ─── Backup / Restore ───────────────────────────────────────────
 
-const BACKUP_DIR = "/home/hus/golden-claw-workspace/orchestrator/projects/ira-memory/backups";
+// Resolve backups/ relative to this source file so there's no machine-
+// specific path baked in. Override with IRA_BACKUP_DIR if needed.
+const BACKUP_DIR =
+  process.env.IRA_BACKUP_DIR ??
+  resolve(dirname(fileURLToPath(import.meta.url)), "..", "backups");
 
 /**
  * Create a pg_dump backup of the ira_memory database.

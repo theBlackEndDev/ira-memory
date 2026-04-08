@@ -12,10 +12,24 @@
 
 set -u
 
-PROJECT_DIR="/home/hus/golden-claw-workspace/orchestrator/projects/ira-memory"
+# Resolve the project root from the script's own location so this file
+# has no machine-specific paths baked in.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 LOG_DIR="${PROJECT_DIR}/logs"
 LOG_FILE="${LOG_DIR}/maintain.log"
-BUN="/home/hus/.bun/bin/bun"
+
+# Find bun on PATH; fall back to the common install location. Cron jobs
+# typically run with a minimal PATH so we extend it explicitly.
+export PATH="${HOME}/.bun/bin:${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+BUN="$(command -v bun || true)"
+if [[ -z "${BUN}" && -x "${HOME}/.bun/bin/bun" ]]; then
+  BUN="${HOME}/.bun/bin/bun"
+fi
+if [[ -z "${BUN}" ]]; then
+  echo "cron-maintain: bun not found on PATH or in ~/.bun/bin" >&2
+  exit 1
+fi
 
 mkdir -p "${LOG_DIR}"
 
