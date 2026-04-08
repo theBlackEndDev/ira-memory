@@ -925,13 +925,29 @@ async function cmdInstallHooks() {
   // Resolve an absolute path to `bun` — Claude Code spawns hooks with a
   // minimal PATH that often does not include ~/.bun/bin, so a bare `bun`
   // silently fails with command-not-found and the hook never captures.
-  let bunPath = "bun";
-  try {
-    bunPath = execSync("command -v bun", { encoding: "utf-8" }).trim() || "bun";
-  } catch {
-    // Fallback to common install location
+  //
+  // Precedence:
+  //   1. IRA_BUN_PATH env var (explicit override for non-default installs:
+  //      nvm, asdf, pnpm, nix, custom prefix, etc.)
+  //   2. `command -v bun` on the current PATH
+  //   3. ~/.bun/bin/bun (default installer location)
+  let bunPath = process.env.IRA_BUN_PATH ?? "";
+  if (!bunPath) {
+    try {
+      bunPath = execSync("command -v bun", { encoding: "utf-8" }).trim();
+    } catch {
+      // command -v failed — fall through to default location check
+    }
+  }
+  if (!bunPath) {
     const candidate = resolve(homeDir, ".bun/bin/bun");
     if (existsSync(candidate)) bunPath = candidate;
+  }
+  if (!bunPath) {
+    console.error(
+      "install-hooks: could not find `bun`. Set IRA_BUN_PATH to the absolute path of your bun binary and re-run."
+    );
+    process.exit(1);
   }
 
   // Build the hook command
