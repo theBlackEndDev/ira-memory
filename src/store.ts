@@ -24,9 +24,20 @@ export async function openSession(input: OpenSessionInput): Promise<Session> {
   });
 }
 
+export interface CloseSessionOptions {
+  /** Run LLM session summary during close. Default true. */
+  summarize?: boolean;
+  /** Run LLM learning extraction during close. Default true. */
+  learn?: boolean;
+}
+
 export async function closeSession(
-  sessionId: string
+  sessionId: string,
+  opts: CloseSessionOptions = {}
 ): Promise<{ session: Session; summary: Summary | null }> {
+  const runSummarize = opts.summarize ?? true;
+  const runLearn = opts.learn ?? true;
+
   const session = await prisma.session.update({
     where: { id: sessionId },
     data: { endedAt: new Date() },
@@ -34,17 +45,19 @@ export async function closeSession(
 
   // Generate session summary
   let sessionSummary: Summary | null = null;
-  try {
-    const msgCount = await prisma.message.count({ where: { sessionId } });
-    if (msgCount > 0) {
-      sessionSummary = await summarize({ scope: "SESSION", sessionId });
+  if (runSummarize) {
+    try {
+      const msgCount = await prisma.message.count({ where: { sessionId } });
+      if (msgCount > 0) {
+        sessionSummary = await summarize({ scope: "SESSION", sessionId });
+      }
+    } catch (err) {
+      console.error(`[closeSession] Failed to summarize session ${sessionId}:`, err);
     }
-  } catch (err) {
-    console.error(`[closeSession] Failed to summarize session ${sessionId}:`, err);
   }
 
   // Extract learnings from the session (opt-out via IRA_AUTO_LEARN=false)
-  if (process.env.IRA_AUTO_LEARN !== "false") {
+  if (runLearn && process.env.IRA_AUTO_LEARN !== "false") {
     try {
       const msgCount = await prisma.message.count({ where: { sessionId } });
       if (msgCount >= 3) {

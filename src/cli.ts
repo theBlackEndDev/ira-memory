@@ -27,6 +27,7 @@ import {
   detectSensitiveFacts,
   backfillFactEmbeddings,
   backfillMessageEmbeddings,
+  flushPendingEmbeds,
   prisma,
 } from "./index.js";
 import type { MemoryCategory, MemoryTier, SummaryScope, LearningType } from "@prisma/client";
@@ -60,6 +61,7 @@ async function main() {
     case "sessions":   return cmdSessions(subArgs);
     case "recall":     return cmdRecall(subArgs);
     case "summarize":  return cmdSummarize(subArgs);
+    case "summarize-pending": return cmdSummarizePending(subArgs);
     case "maintain":   return cmdMaintain();
     case "compact":    return cmdCompact(subArgs);
     case "conflicts":  return cmdConflicts(subArgs);
@@ -96,6 +98,7 @@ Commands:
   sessions  [--limit N]                                   List sessions
   stats                                                   Show memory statistics
   summarize --scope SESSION|DAILY|WEEKLY|PROJECT [opts]   Generate a summary
+  summarize-pending [--limit N] [--skip-learn]            Backfill summaries for closed sessions without one
   maintain                                                Run tier promotion/expiration
   compact   [--days N]                                    Compact old messages (default 90d)
   conflicts [--limit N]                                   Detect conflicting facts
@@ -468,6 +471,78 @@ async function cmdSummarize(args: string[]) {
   console.log(`  Topics: ${summary.keyTopics.join(", ") || "none"}`);
   console.log(`  Facts extracted: ${summary.factIds.length}`);
   console.log(`\n${summary.content}`);
+}
+
+/**
+ * Backfill summaries + learnings for sessions that were closed without
+ * derived data (e.g. by cc-capture, which skips the LLM hot path so the
+ * SessionEnd hook doesn't get killed mid-OpenAI call).
+ *
+ * A session is considered "pending" if ended_at IS NOT NULL, it has at
+ * least one message, and it has zero rows in the summaries table.
+ */
+async function cmdSummarizePending(args: string[]) {
+  const { values } = parseArgs({
+    args,
+    options: {
+      limit: { type: "string", default: "50" },
+      "skip-learn": { type: "boolean" },
+    },
+    strict: false,
+  });
+
+  const limit = parseInt(values.limit ?? "50");
+  const { prisma } = await import("./client.js");
+  const { summarize } = await import("./summarize.js");
+
+  // Find closed sessions with at least 1 message and no summary
+  const pending = await prisma.$queryRaw<Array<{ id: string; title: string | null; msgs: bigint }>>`
+    SELECT s.id, s.title, COUNT(m.id) AS msgs
+    FROM sessions s
+    LEFT JOIN messages m ON m.session_id = s.id
+    LEFT JOIN summaries sm ON sm.session_id = s.id
+    WHERE s.ended_at IS NOT NULL
+      AND sm.id IS NULL
+    GROUP BY s.id, s.title
+    HAVING COUNT(m.id) > 0
+    ORDER BY s.started_at DESC
+    LIMIT ${limit}
+  `;
+
+  if (pending.length === 0) {
+    console.log("No pending sessions — all closed sessions already have summaries.");
+    return;
+  }
+
+  console.log(`Found ${pending.length} pending session(s). Backfilling...\n`);
+
+  let summarized = 0;
+  let learned = 0;
+  let failed = 0;
+
+  for (const s of pending) {
+    const msgCount = Number(s.msgs);
+    const label = (s.title ?? "(untitled)").slice(0, 60);
+    process.stdout.write(`  [${s.id.slice(0, 8)}] ${msgCount} msgs — ${label}... `);
+    try {
+      await summarize({ scope: "SESSION", sessionId: s.id });
+      summarized++;
+
+      if (!values["skip-learn"] && msgCount >= 3) {
+        const { learn } = await import("./learn.js");
+        const result = await learn({ sessionId: s.id, dedup: true, minConfidence: 0.7 });
+        learned += result.totalExtracted;
+      }
+      console.log("ok");
+    } catch (err) {
+      failed++;
+      console.log(`FAIL: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  console.log(
+    `\nDone. Summarized: ${summarized}, learnings extracted: ${learned}, failed: ${failed}`
+  );
 }
 
 // ─── Phase 3: Maintenance ───────────────────────────────────────
@@ -923,4 +998,10 @@ main()
     console.error("Error:", err);
     process.exit(1);
   })
-  .finally(() => prisma.$disconnect());
+  .finally(async () => {
+    // Drain in-flight fire-and-forget embed calls before closing the
+    // Prisma engine, otherwise they race the disconnect and print
+    // "Engine is not yet connected" errors.
+    await flushPendingEmbeds();
+    await prisma.$disconnect();
+  });

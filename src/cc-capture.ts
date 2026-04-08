@@ -204,10 +204,16 @@ async function main() {
     });
   }
 
-  // Close session (triggers auto-summary + learning extraction)
+  // Close session WITHOUT summary + learn — those are derived data and
+  // can take 5-10s of OpenAI time, during which Claude Code has been
+  // observed to kill the hook subprocess before completion. We leave the
+  // session marked ended_at=now with no summary, and rely on
+  // `cli.ts summarize-pending` (or a maintenance pass) to backfill
+  // summaries and learnings out-of-band.
   try {
-    await closeSession(session.id);
+    await closeSession(session.id, { summarize: false, learn: false });
   } catch (err) {
+    dlog(`closeSession error (non-fatal): ${err}`);
     console.error(`[cc-capture] closeSession error (non-fatal): ${err}`);
   }
 
