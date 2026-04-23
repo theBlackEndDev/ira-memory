@@ -68,24 +68,70 @@ async function main() {
     }
 
     case "recall-context": {
-      const [sessionId] = args;
+      const [sessionId, projectSlug] = args;
       try {
         // Get recent facts: active TODOs, PLANs, recent DECISIONs, and PROJECT_STATE
         const now = new Date();
         const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
-        const results = await recall({
+        // If a projectSlug is passed (e.g. "faceless-youtube"), scope recall to it
+        // through three independent signals (merged, dedup'd):
+        //   1. tags: ["project:<slug>"]  — new facts written by summarize.ts
+        //   2. query: "<slug with spaces>" — FTS + semantic (covers pre-tag data)
+        //   3. content prefix "[<slug>]" — FTS fallback
+        // Project-less calls stay global (back-compat).
+        const hasProject = projectSlug && projectSlug !== "-";
+        const projectQuery = hasProject ? projectSlug.replace(/-/g, " ") : undefined;
+        const projectTag = hasProject ? [`project:${projectSlug}`] : undefined;
+
+        // Two passes — one tag-based (strict), one query-based (loose) — to
+        // catch both tagged-by-summarize facts AND older untagged facts whose
+        // content mentions the project slug.
+        const recentTagged = hasProject ? await recall({
+          categories: ["TODO", "PLAN", "DECISION", "PROJECT_STATE"],
+          timeRange: { after: yesterday },
+          limit: 10,
+          tags: projectTag,
+        }) : { facts: [], summaries: [] };
+
+        const recentQueried = await recall({
           categories: ["TODO", "PLAN", "DECISION", "PROJECT_STATE"],
           timeRange: { after: yesterday },
           limit: 15,
+          ...(projectQuery && { query: projectQuery }),
         });
 
-        // Also get LONG_TERM preferences and context
-        const longTerm = await recall({
+        // Merge + dedup by id
+        const seenRecent = new Set<string>();
+        const mergedRecentFacts = [...recentTagged.facts, ...recentQueried.facts]
+          .filter((f) => !seenRecent.has(f.id) && seenRecent.add(f.id))
+          .slice(0, 15);
+        const mergedRecentSummaries = [
+          ...recentTagged.summaries,
+          ...recentQueried.summaries,
+        ].filter((s) => !seenRecent.has(s.id) && seenRecent.add(s.id));
+        const results = { facts: mergedRecentFacts, summaries: mergedRecentSummaries };
+
+        // Long-term — same two-pass merge
+        const longTermTagged = hasProject ? await recall({
           tier: "LONG_TERM",
-          categories: ["PREFERENCE", "CONTEXT", "DECISION"],
+          categories: ["PREFERENCE", "CONTEXT", "DECISION", "LESSON"],
+          limit: 8,
+          tags: projectTag,
+        }) : { facts: [] };
+
+        const longTermQueried = await recall({
+          tier: "LONG_TERM",
+          categories: ["PREFERENCE", "CONTEXT", "DECISION", "LESSON"],
           limit: 10,
+          ...(projectQuery && { query: projectQuery }),
         });
+
+        const seenLong = new Set<string>();
+        const longTermFacts = [...longTermTagged.facts, ...longTermQueried.facts]
+          .filter((f) => !seenLong.has(f.id) && seenLong.add(f.id))
+          .slice(0, 12);
+        const longTerm = { facts: longTermFacts };
 
         const contextParts: string[] = [];
 

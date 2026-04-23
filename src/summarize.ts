@@ -62,6 +62,18 @@ export async function summarize(input: SummarizeInput): Promise<Summary> {
   return summary;
 }
 
+/**
+ * Derive a project slug from a Claude Code cwd. Returns null if the session
+ * didn't originate inside a recognized project directory.
+ *
+ * Recognized: /orchestrator/projects/<slug>/...
+ */
+function deriveProjectSlug(cwd: string | null | undefined): string | null {
+  if (!cwd) return null;
+  const m = cwd.match(/\/orchestrator\/projects\/([^/]+)(?:\/|$)/);
+  return m ? m[1] : null;
+}
+
 async function summarizeSession(sessionId: string) {
   const session = await prisma.session.findUniqueOrThrow({
     where: { id: sessionId },
@@ -123,21 +135,34 @@ Respond in this exact JSON format:
     "CHECKPOINT", "CONTEXT", "TOOL_CONFIG", "PROJECT_STATE",
   ]);
 
+  // Derive project slug from session.metadata.cwd so facts + summary inherit
+  // the project scope. This lets recall-context filter by `project:<slug>` tag
+  // AND the slug appears in content so FTS/semantic query also match.
+  const sessionMeta = (session.metadata as { cwd?: string } | null) ?? null;
+  const projectSlug = deriveProjectSlug(sessionMeta?.cwd ?? null);
+  const projectTag = projectSlug ? `project:${projectSlug}` : null;
+
   const storedFactIds: string[] = [];
   if (parsed.facts && Array.isArray(parsed.facts)) {
     for (const fact of parsed.facts) {
       try {
         // Validate category from LLM — fall back to FACT if invalid
         const category = VALID_CATEGORIES.has(fact.category) ? fact.category : "FACT";
+        const baseTags = ["session-summary"];
+        const tags = projectTag ? [...baseTags, projectTag] : baseTags;
+        // Prepend project slug to content for FTS/semantic matching on the slug.
+        const content = projectSlug
+          ? `[${projectSlug}] ${fact.content}`
+          : fact.content;
         const stored = await prisma.memoryFact.create({
           data: {
             category,
             tier: "SHORT_TERM",
-            content: fact.content,
+            content,
             source: "inferred",
             sourceRef: sessionId,
             confidence: 0.8,
-            tags: ["session-summary"],
+            tags,
           },
         });
         storedFactIds.push(stored.id);
