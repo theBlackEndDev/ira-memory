@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { prisma } from "./client.js";
 import { store, storeMessage, openSession, forget } from "./store.js";
 import { recall, textSearch, listFacts } from "./recall.js";
+import { deriveProjectSlug } from "./summarize.js";
 import type { MemoryCategory } from "./types.js";
 
 const PORT = Number(process.env.MEMORY_API_PORT ?? 7775);
@@ -93,6 +94,20 @@ async function parseJson(req: Request): Promise<any> {
   }
 }
 
+// Resolve a project slug from explicit ?project=, X-Project header, or
+// X-Cwd header (path containing /orchestrator/projects/<slug>/...).
+// Returns null when no project context is available — callers must keep
+// behavior un-filtered in that case for back-compat.
+function resolveProject(req: Request, url: URL): string | null {
+  const explicit = url.searchParams.get("project");
+  if (explicit) return explicit;
+  const headerSlug = req.headers.get("x-project");
+  if (headerSlug) return headerSlug;
+  const cwdHeader = req.headers.get("x-cwd");
+  if (cwdHeader) return deriveProjectSlug(cwdHeader);
+  return null;
+}
+
 function serializeFact(f: any) {
   const meta = (f.metadata ?? {}) as Record<string, unknown>;
   return {
@@ -153,8 +168,17 @@ async function handle(req: Request): Promise<Response> {
     if (pathname === "/conversation/recent" && method === "GET") {
       const limit = Math.min(Number(url.searchParams.get("limit") ?? 20), 200);
       const channel = url.searchParams.get("channel");
+      const project = resolveProject(req, url);
+      const sessionFilter: Record<string, unknown> = {};
+      if (channel) sessionFilter.channel = channel;
+      if (project) {
+        sessionFilter.metadata = {
+          path: ["cwd"],
+          string_contains: `/projects/${project}`,
+        };
+      }
       const messages = await prisma.message.findMany({
-        where: channel ? { session: { channel } } : {},
+        where: Object.keys(sessionFilter).length ? { session: sessionFilter } : {},
         include: { session: { select: { channel: true } } },
         orderBy: { createdAt: "desc" },
         take: limit,
@@ -184,16 +208,28 @@ async function handle(req: Request): Promise<Response> {
       if (!body?.content) return err("content required");
       const fridayType = (body.type ?? "user").toLowerCase();
       const category = TYPE_TO_CATEGORY[fridayType] ?? "CONTEXT";
+      // Resolve project from body.project, X-Project header, or X-Cwd header.
+      const project =
+        (typeof body.project === "string" && body.project) ||
+        resolveProject(req, url);
+      const extraTags = project ? [`project:${project}`] : [];
+      // Prepend [slug] to content so FTS/semantic queries on the slug also
+      // match this fact — matches summarize.ts behavior for auto-summary facts.
+      const content =
+        project && !body.content.startsWith(`[${project}]`)
+          ? `[${project}] ${body.content}`
+          : body.content;
       const fact = await store({
         category,
         tier: "LONG_TERM",
-        content: body.content,
+        content,
         source: "explicit",
-        tags: [`friday:${fridayType}`, ...(body.tags ?? [])],
+        tags: [`friday:${fridayType}`, ...extraTags, ...(body.tags ?? [])],
         metadata: {
           name: body.name,
           description: body.description,
           friday_type: fridayType,
+          ...(project ? { project } : {}),
         },
       });
       return json({ id: fact.id, ...serializeFact(fact) });
@@ -201,7 +237,11 @@ async function handle(req: Request): Promise<Response> {
 
     if (pathname === "/memory/list" && method === "GET") {
       const limit = Math.min(Number(url.searchParams.get("limit") ?? 50), 500);
-      const result = await listFacts({ limit });
+      const project = resolveProject(req, url);
+      const result = await listFacts({
+        limit,
+        ...(project && { tags: [`project:${project}`] }),
+      });
       return json({
         facts: result.facts.map(serializeFact),
         total: result.total,
@@ -211,7 +251,12 @@ async function handle(req: Request): Promise<Response> {
     if (pathname === "/memory/recall" && method === "GET") {
       const topic = url.searchParams.get("topic") ?? undefined;
       const limit = Math.min(Number(url.searchParams.get("limit") ?? 20), 100);
-      const result = await recall({ query: topic, limit });
+      const project = resolveProject(req, url);
+      const result = await recall({
+        query: topic,
+        limit,
+        ...(project && { tags: [`project:${project}`] }),
+      });
       return json({
         facts: result.facts.map(serializeFact),
         summaries: result.summaries.map((s) => ({
@@ -227,8 +272,14 @@ async function handle(req: Request): Promise<Response> {
       const q = url.searchParams.get("q");
       if (!q) return err("q required");
       const limit = Math.min(Number(url.searchParams.get("limit") ?? 20), 100);
+      const project = resolveProject(req, url);
       const result = await textSearch({ query: q, tables: ["facts"], limit });
-      return json({ facts: result.facts.map(serializeFact) });
+      // textSearch doesn't natively filter by tag — post-filter when project
+      // is set so the contract is still "project-scoped or nothing".
+      const facts = project
+        ? result.facts.filter((f) => f.tags?.includes(`project:${project}`))
+        : result.facts;
+      return json({ facts: facts.map(serializeFact) });
     }
 
     const memoryIdMatch = pathname.match(/^\/memory\/([^/]+)$/);

@@ -137,6 +137,13 @@ export async function recall(input: RecallInput): Promise<RecallResult> {
 
   scoredFacts.sort((a, b) => b.score - a.score);
 
+  // FTS + semantic layers above add facts independent of the structured tag
+  // filter. If the caller passed `tags`, enforce it as a final hard filter so
+  // the contract is "tag-scoped or nothing."
+  const filteredFacts = input.tags?.length
+    ? scoredFacts.filter((f) => input.tags!.some((t) => f.tags.includes(t)))
+    : scoredFacts;
+
   // Score summaries (simple recency)
   const scoredSummaries = summaries.map((s) => {
     const daysAgo =
@@ -174,7 +181,7 @@ export async function recall(input: RecallInput): Promise<RecallResult> {
   }
 
   return {
-    facts: scoredFacts.slice(0, limit),
+    facts: filteredFacts.slice(0, limit),
     summaries: scoredSummaries.slice(0, limit),
     messages,
   };
@@ -255,6 +262,7 @@ export async function listFacts(
     ...(input?.includeArchived ? {} : { isArchived: false }),
     ...(input?.category && { category: input.category }),
     ...(input?.tier && { tier: input.tier }),
+    ...(input?.tags?.length && { tags: { hasSome: input.tags } }),
   };
 
   const [facts, total] = await Promise.all([

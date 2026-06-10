@@ -68,7 +68,7 @@ export async function summarize(input: SummarizeInput): Promise<Summary> {
  *
  * Recognized: /orchestrator/projects/<slug>/...
  */
-function deriveProjectSlug(cwd: string | null | undefined): string | null {
+export function deriveProjectSlug(cwd: string | null | undefined): string | null {
   if (!cwd) return null;
   const m = cwd.match(/\/orchestrator\/projects\/([^/]+)(?:\/|$)/);
   return m ? m[1] : null;

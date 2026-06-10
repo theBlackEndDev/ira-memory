@@ -95,6 +95,39 @@ async function main() {
 
   console.log();
   console.log(`TOTAL  facts checked: ${totalChecked}  newly tagged: ${totalTagged}  already tagged: ${totalAlreadyTagged}`);
+
+  // ── Second pass: tag manually-POSTed facts (no sourceRef) by content prefix.
+  // These come from /memory POST and never had session.metadata.cwd to derive
+  // from, but if their content starts with `[<slug>] ` we can tag retroactively.
+  console.log("\nContent-prefix pass (facts with [<slug>] in content):");
+  const slugsToCheck = targetSlug ? [targetSlug] : [...groups.keys()];
+  let prefixTagged = 0;
+  for (const slug of slugsToCheck) {
+    const tag = `project:${slug}`;
+    const prefix = `[${slug}]`;
+    const facts = await prisma.memoryFact.findMany({
+      where: {
+        content: { startsWith: prefix },
+        NOT: { tags: { has: tag } },
+      },
+      select: { id: true },
+    });
+    if (facts.length === 0) {
+      console.log(`  ${slug.padEnd(24)} no prefix-only facts`);
+      continue;
+    }
+    if (!dryRun) {
+      for (const f of facts) {
+        await prisma.memoryFact.update({
+          where: { id: f.id },
+          data: { tags: { push: tag } },
+        });
+      }
+    }
+    prefixTagged += facts.length;
+    console.log(`  ${slug.padEnd(24)} prefix-tagged=${facts.length}`);
+  }
+  console.log(`\nContent-prefix newly tagged: ${prefixTagged}`);
   if (dryRun) console.log("(dry-run — no changes written)");
 
   await prisma.$disconnect();

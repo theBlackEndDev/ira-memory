@@ -83,6 +83,7 @@ export interface TextSearchResult {
 export interface ListFactsInput {
   category?: MemoryCategory;
   tier?: MemoryTier;
+  tags?: string[];
   includeArchived?: boolean;
   limit?: number;
   offset?: number;
