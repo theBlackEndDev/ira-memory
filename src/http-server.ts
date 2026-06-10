@@ -232,7 +232,7 @@ async function handle(req: Request): Promise<Response> {
           ...(project ? { project } : {}),
         },
       });
-      return json({ id: fact.id, ...serializeFact(fact) });
+      return json(serializeFact(fact));
     }
 
     if (pathname === "/memory/list" && method === "GET") {
