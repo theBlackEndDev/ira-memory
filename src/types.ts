@@ -55,7 +55,11 @@ export interface RecallInput {
   query?: string;
   categories?: MemoryCategory[];
   tier?: MemoryTier;
+  /** Hard filter: results MUST carry one of these tags ("tag-scoped or nothing"). */
   tags?: string[];
+  /** Soft boost: results carrying one of these tags rank higher, but others still surface
+   *  (so a sparse/new project never returns an empty recall). Use for cwd-derived scoping. */
+  boostTags?: string[];
   timeRange?: { after?: Date; before?: Date };
   channel?: string;
   sessionId?: string;

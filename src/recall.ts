@@ -129,8 +129,14 @@ export async function recall(input: RecallInput): Promise<RecallResult> {
       fact.tier === "LONG_TERM" ? 1.0 : fact.tier === "DAILY" ? 0.6 : 0.3;
     const relevance = ftsFactIds.has(fact.id) ? 1.0 : semanticFactIds.has(fact.id) ? 0.8 : 0.5;
 
+    // Soft project boost: a large additive bump (not a filter) so same-project facts rank
+    // above similarly-relevant other-project ones, while other projects still surface if the
+    // current one is sparse. Distinct from `tags`, which hard-filters.
+    const boost =
+      input.boostTags?.length && input.boostTags.some((t) => fact.tags.includes(t)) ? 0.5 : 0;
+
     const score =
-      0.3 * recency + 0.4 * relevance + 0.2 * tierWeight + 0.1 * fact.confidence;
+      0.3 * recency + 0.4 * relevance + 0.2 * tierWeight + 0.1 * fact.confidence + boost;
 
     return { ...fact, score };
   });

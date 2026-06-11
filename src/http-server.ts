@@ -251,11 +251,16 @@ async function handle(req: Request): Promise<Response> {
     if (pathname === "/memory/recall" && method === "GET") {
       const topic = url.searchParams.get("topic") ?? undefined;
       const limit = Math.min(Number(url.searchParams.get("limit") ?? 20), 100);
-      const project = resolveProject(req, url);
+      // Explicit project (?project= / X-Project) is a deliberate hard scope (e.g. resume).
+      // A project DERIVED from the caller's cwd (X-Cwd) is ambient — boost, don't filter,
+      // so a sparse/new project still gets a useful recall instead of nothing.
+      const explicitProject = url.searchParams.get("project") ?? req.headers.get("x-project");
+      const cwdProject = !explicitProject ? deriveProjectSlug(req.headers.get("x-cwd")) : null;
       const result = await recall({
         query: topic,
         limit,
-        ...(project && { tags: [`project:${project}`] }),
+        ...(explicitProject && { tags: [`project:${explicitProject}`] }),
+        ...(cwdProject && { boostTags: [`project:${cwdProject}`] }),
       });
       return json({
         facts: result.facts.map(serializeFact),

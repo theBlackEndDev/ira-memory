@@ -66,11 +66,15 @@ export async function summarize(input: SummarizeInput): Promise<Summary> {
  * Derive a project slug from a Claude Code cwd. Returns null if the session
  * didn't originate inside a recognized project directory.
  *
- * Recognized: /orchestrator/projects/<slug>/...
+ * Recognized (immediate child of a projects dir, returned verbatim):
+ *   /orchestrator/projects/<slug>/...   (server layout)
+ *   ~/Projects/<slug>/...               (home layout, e.g. macOS)
+ * Nested repos (~/Projects/parent/child) resolve to <parent> — coarser but stable,
+ * which is enough to keep distinct projects' memory from bleeding together.
  */
 export function deriveProjectSlug(cwd: string | null | undefined): string | null {
   if (!cwd) return null;
-  const m = cwd.match(/\/orchestrator\/projects\/([^/]+)(?:\/|$)/);
+  const m = cwd.match(/\/[Pp]rojects\/([^/]+)(?:\/|$)/);
   return m ? m[1] : null;
 }
 
