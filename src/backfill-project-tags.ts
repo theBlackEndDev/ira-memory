@@ -15,16 +15,13 @@
  *   --dry-run          Report what would change without writing.
  */
 import { prisma } from "./client.js";
+// Single source of truth for slug derivation — must match what the server and write paths use,
+// or the backfill silently tags nothing for layouts it doesn't recognize (e.g. ~/Projects/).
+import { deriveProjectSlug as deriveSlug } from "./summarize.js";
 
 interface SessionRow {
   id: string;
   metadata: unknown;
-}
-
-function deriveSlug(cwd: string | null | undefined): string | null {
-  if (!cwd) return null;
-  const m = cwd.match(/\/orchestrator\/projects\/([^/]+)(?:\/|$)/);
-  return m ? m[1] : null;
 }
 
 async function main() {
