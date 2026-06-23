@@ -49,6 +49,17 @@ bun run src/cli.ts stats
 bun run memory-api
 ```
 
+## Updating an existing install
+
+```bash
+bun run update          # git pull (ff-only) + bun install + prisma migrate deploy + restart service + health check
+bun run update -- --dry-run
+```
+
+Restarts the managed service (systemd `ira-memory-api` / launchd `com.ira.ira-memory-api`) so it
+picks up new code and `.env` changes; prints a hint if there's no managed unit. Idempotent and
+safe to re-run; it stops on uncommitted tracked changes (commit/stash first).
+
 ## HTTP Memory API
 
 `src/http-server.ts` exposes a single shared memory surface across every channel

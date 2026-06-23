@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "bun run src/cli.ts",
     "memory-api": "bun run src/http-server.ts",
+    "update": "bun run scripts/update.ts",
     "db:migrate": "bunx prisma migrate dev",
     "db:push": "bunx prisma db push",
     "db:generate": "bunx prisma generate",
