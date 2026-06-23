@@ -1,9 +1,10 @@
-import OpenAI from "openai";
 import { prisma } from "./client.js";
 import { embedSummaryAsync } from "./embed.js";
+import { getClient, CHAT_MODEL } from "./llm.js";
 import type { Summary, SummaryScope } from "./types.js";
 
-const openai = new OpenAI();
+// null when IRA_LLM_PROVIDER=none → summary functions fall back to extractive (no LLM) summaries.
+const openai = getClient();
 
 export interface SummarizeInput {
   scope: SummaryScope;
@@ -109,8 +110,20 @@ async function summarizeSession(sessionId: string) {
     convoText += line;
   }
 
+  // No LLM (IRA_LLM_PROVIDER=none) → extractive fallback: keep the (truncated) transcript as the
+  // summary, no fact extraction. The raw turns remain fully searchable via FTS.
+  if (!openai) {
+    return {
+      content: convoText.slice(0, 2000),
+      periodStart: session.startedAt,
+      periodEnd: session.endedAt ?? new Date(),
+      keyTopics: [] as string[],
+      factIds: [] as string[],
+    };
+  }
+
   const llmResponse = await openai.chat.completions.create({
-    model: "gpt-4.1-nano",
+    model: CHAT_MODEL,
     messages: [
       {
         role: "system",
@@ -217,8 +230,12 @@ async function summarizeDaily(date: Date) {
     ...todayFacts.map((f) => `- [${f.category}] ${f.content}`),
   ].join("\n");
 
+  if (!openai) {
+    return { content: inputText.slice(0, 2000), periodStart: dayStart, periodEnd: dayEnd, keyTopics: [] as string[], factIds: todayFacts.map((f) => f.id) };
+  }
+
   const llmResponse = await openai.chat.completions.create({
-    model: "gpt-4.1-nano",
+    model: CHAT_MODEL,
     messages: [
       {
         role: "system",
@@ -264,8 +281,12 @@ async function summarizeWeekly(weekStart: Date) {
     .map((s) => `${s.periodStart.toISOString().split("T")[0]}:\n${s.content}`)
     .join("\n\n");
 
+  if (!openai) {
+    return { content: inputText.slice(0, 2000), periodStart: start, periodEnd: end, keyTopics: [] as string[], factIds: [] as string[] };
+  }
+
   const llmResponse = await openai.chat.completions.create({
-    model: "gpt-4.1-nano",
+    model: CHAT_MODEL,
     messages: [
       {
         role: "system",
@@ -323,8 +344,12 @@ async function summarizeProject(
     ...projectFacts.map((f) => `- [${f.category}/${f.tier}] ${f.content}`),
   ].join("\n");
 
+  if (!openai) {
+    return { content: inputText.slice(0, 2000), periodStart: start, periodEnd: end, keyTopics: [] as string[], factIds: projectFacts.map((f) => f.id) };
+  }
+
   const llmResponse = await openai.chat.completions.create({
-    model: "gpt-4.1-nano",
+    model: CHAT_MODEL,
     messages: [
       {
         role: "system",

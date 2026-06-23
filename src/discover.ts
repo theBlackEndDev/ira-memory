@@ -1,13 +1,13 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative, extname } from "node:path";
 import { createHash } from "node:crypto";
-import OpenAI from "openai";
 import { prisma } from "./client.js";
 import { store } from "./store.js";
 import { semanticSearch } from "./search.js";
+import { getClient, CHAT_MODEL } from "./llm.js";
 import type { DiscoverInput, DiscoverResult, DiscoverAspect, LearningType, MemoryCategory } from "./types.js";
 
-const openai = new OpenAI();
+const openai = getClient(); // null when IRA_LLM_PROVIDER=none → discovery produces no facts
 
 const DEFAULT_INCLUDE_EXTS = new Set([
   ".ts", ".tsx", ".js", ".jsx", ".json", ".yaml", ".yml", ".md",
@@ -188,9 +188,10 @@ export async function discover(input: DiscoverInput): Promise<DiscoverResult> {
   }> = [];
 
   for (const chunk of chunks) {
+    if (!openai) break; // no LLM provider → no discoveries (allDiscoveries stays empty)
     try {
       const llmResponse = await openai.chat.completions.create({
-        model: "gpt-4.1-nano",
+        model: CHAT_MODEL,
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: `Analyze these source files:\n${chunk}` },

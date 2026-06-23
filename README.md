@@ -118,6 +118,36 @@ bun run src/cli.ts stats      # Check message/session counts
 bun run src/cli.ts sessions    # List captured sessions
 ```
 
+## LLM provider — running without OpenAI
+
+ira-memory uses an LLM for two things: **embeddings** (semantic recall) and **summaries** (session
+summaries + fact extraction). Both go through a single provider switch (`src/llm.ts`), so you can
+run with no OpenAI dependency. Set `IRA_LLM_PROVIDER` in `.env`:
+
+| Provider | Embeddings + summaries | Set | Data leaves box? |
+|----------|------------------------|-----|------------------|
+| `openai` *(default)* | OpenAI cloud | `OPENAI_API_KEY` | yes (OpenAI) |
+| `gemini` | Google Gemini (OpenAI-compat endpoint) — Flash + Gemini embeddings | `GEMINI_API_KEY` | yes (Google) |
+| `local` | OpenAI-compatible local server (Ollama / LM Studio) | `OPENAI_BASE_URL` (default `:11434/v1`) | **no** |
+| `none` | nothing — embeddings + summaries skipped | — | **no** |
+
+**Recall degrades gracefully.** With embeddings off (`none`, or `IRA_EMBED=off`), recall drops the
+semantic layer and falls back to full-text + structured + project-tag search — conversation logging,
+manual facts, and project-scoped recall all still work.
+
+Common setups:
+- **Completely local / nothing leaves the box:** `IRA_LLM_PROVIDER=none` (zero infra), or
+  `IRA_LLM_PROVIDER=local` with Ollama for full semantic recall (needs a local model server).
+- **Reuse a Gemini subscription (no OpenAI bill):** `IRA_LLM_PROVIDER=gemini` + `GEMINI_API_KEY`.
+  Add `IRA_EMBED=off` to get Flash summaries with full-text recall and skip the embedding-dimension
+  step entirely. Leave embeddings on for semantic recall — `gemini-embedding-001` emits 1536 dims
+  (we request it), matching the schema, so no migration is needed.
+
+> Embedding dimension: the pgvector schema is `vector(1536)`. OpenAI `text-embedding-3-small` and
+> Gemini `gemini-embedding-001` both emit 1536 (we pass `dimensions`). A fixed-size local model
+> (e.g. Ollama `nomic-embed-text` = 768) needs either `IRA_EMBED=off`, or `IRA_EMBED_DIMS=768` plus
+> a migration of the `*_embeddings` columns — only clean on a fresh DB.
+
 ## Configuration
 
 All config lives in `.env`:
@@ -125,7 +155,10 @@ All config lives in `.env`:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MEMORY_DATABASE_URL` | PostgreSQL connection string | `postgresql://ira_memory:ira_memory_secret@localhost:5433/ira_memory` |
-| `OPENAI_API_KEY` | Required for embeddings and summarization | — |
+| `IRA_LLM_PROVIDER` | `openai` \| `gemini` \| `local` \| `none` (see above) | `openai` |
+| `OPENAI_API_KEY` | Required for `provider=openai` (embeddings + summarization) | — |
+| `GEMINI_API_KEY` | Required for `provider=gemini` | — |
+| `IRA_EMBED` | Set to `off` to disable embeddings independent of provider | on |
 | `MEMORY_API_HOST` | HTTP API bind address | `127.0.0.1` |
 | `MEMORY_API_PORT` | HTTP API port | `7775` |
 | `IRA_BUN_PATH` | Absolute path to `bun` binary — only set when bun isn't at `~/.bun/bin/bun` (nvm/asdf/pnpm/nix). Used by `install-hooks` and `scripts/cron-maintain.sh`. | `~/.bun/bin/bun` |

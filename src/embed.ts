@@ -1,17 +1,20 @@
-import OpenAI from "openai";
 import { prisma } from "./client.js";
-
-const openai = new OpenAI();
-const EMBED_MODEL = "text-embedding-3-small";
-const EMBED_DIMS = 1536;
+import { getClient, embeddingsEnabled, EMBED_MODEL, EMBED_DIMS, EMBED_SUPPORTS_DIMENSIONS } from "./llm.js";
 
 /**
- * Generate embedding for text via OpenAI API
+ * Generate embedding for text via the configured provider (OpenAI / Gemini / local / none).
+ * Returns [] when embeddings are disabled (IRA_LLM_PROVIDER=none or IRA_EMBED=off) — callers skip
+ * storing, and semantic recall transparently falls back to full-text + structured search.
+ * Requests EMBED_DIMS for providers that support it, so OpenAI and Gemini both emit vectors that
+ * match the pgvector schema (1536) without a migration.
  */
 export async function generateEmbedding(text: string): Promise<number[]> {
+  const openai = getClient();
+  if (!embeddingsEnabled || !openai) return [];
   const response = await openai.embeddings.create({
     model: EMBED_MODEL,
     input: text.slice(0, 8000), // Truncate to avoid token limits
+    ...(EMBED_SUPPORTS_DIMENSIONS ? { dimensions: EMBED_DIMS } : {}),
   });
   return response.data[0].embedding;
 }
@@ -34,6 +37,7 @@ export async function embedMessage(messageId: string): Promise<boolean> {
     if (existing.length > 0) return false;
 
     const vector = await generateEmbedding(message.content);
+    if (!vector.length) return false; // embeddings disabled — nothing to store
     const vectorStr = `[${vector.join(",")}]`;
 
     await prisma.$executeRaw`
@@ -63,6 +67,7 @@ export async function embedFact(factId: string): Promise<boolean> {
     if (existing.length > 0) return false;
 
     const vector = await generateEmbedding(fact.content);
+    if (!vector.length) return false; // embeddings disabled — nothing to store
     const vectorStr = `[${vector.join(",")}]`;
 
     await prisma.$executeRaw`
@@ -91,6 +96,7 @@ export async function embedSummary(summaryId: string): Promise<boolean> {
     if (existing.length > 0) return false;
 
     const vector = await generateEmbedding(summary.content);
+    if (!vector.length) return false; // embeddings disabled — nothing to store
     const vectorStr = `[${vector.join(",")}]`;
 
     await prisma.$executeRaw`

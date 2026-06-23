@@ -27,10 +27,11 @@ export async function semanticSearch(
   const threshold = input.threshold ?? 0.3;
   const tables = input.tables ?? ["facts", "summaries"];
 
-  const queryVector = await generateEmbedding(input.query);
-  const vectorStr = `[${queryVector.join(",")}]`;
-
   const result: SemanticSearchResult = { facts: [], summaries: [], messages: [] };
+
+  const queryVector = await generateEmbedding(input.query);
+  if (!queryVector.length) return result; // embeddings disabled — recall falls back to FTS + structured
+  const vectorStr = `[${queryVector.join(",")}]`;
 
   if (tables.includes("facts")) {
     const rawFacts = await prisma.$queryRaw<
