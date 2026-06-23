@@ -2,6 +2,8 @@
 
 Database-backed conversation memory system for IRA / OpenClaw. Stores full conversation history, extracts durable memory facts, and supports structured + semantic retrieval across all sessions and channels.
 
+> This is the **memory backend for [IRA](https://github.com/theBlackEndDev/ira)**. It runs standalone as an HTTP service on `:7775` — the IRA client reaches it over HTTP (`IRA_MEMORY_URL`), so one backend can serve multiple IRA installs across machines. Under IRA's v5 install, session capture and recall are wired automatically by the IRA installer (the `SessionCapture` and `IraRecall` hooks); the `install-hooks` command below is the standalone path for non-v5 setups.
+
 ## Architecture
 
 ```
@@ -188,11 +190,12 @@ bun run src/cli.ts <command> [options]
 | `restore` | Restore from a pg_dump file | `restore ./backups/ira-memory-2026-04-06.sql` |
 | `backfill` | Generate embeddings for unembedded items | `backfill --type facts --batch 50` |
 
-Retroactively tag historical facts with `project:<slug>` based on the originating session's `cwd` (idempotent, no LLM, metadata-only):
+Retroactively tag historical facts with `project:<slug>` (idempotent, no LLM, metadata-only). Two passes: **session-derived** (tags facts whose session `cwd` resolves to a slug — both `~/Projects/` and `/orchestrator/projects/` layouts) and **content-prefix** (tags facts whose content starts with `[<slug>]` but lack the tag, e.g. manually-POSTed facts with no session). Only sessions that recorded a `cwd` are taggable; everything captured going forward tags automatically.
 
 ```bash
-bun run src/backfill-project-tags.ts --dry-run
-bun run src/backfill-project-tags.ts --project faceless-youtube
+bun run src/backfill-project-tags.ts --dry-run            # preview groups + counts
+bun run src/backfill-project-tags.ts                       # apply (all projects)
+bun run src/backfill-project-tags.ts --project faceless-youtube   # scope to one
 ```
 
 ### Learning loop
@@ -351,17 +354,31 @@ ira-memory/
 
 ## Project-Scoped Recall
 
-When a Claude Code session originates inside `<...>/orchestrator/projects/<slug>/`,
-the slug is auto-derived from `session.metadata.cwd` and:
+Recall is biased toward the project a session is working in, so a dense project's
+memory never drowns the one you're actually in.
 
-1. Facts extracted by session summarization are tagged `project:<slug>`.
-2. Their content is prefixed with `[<slug>]` so FTS/semantic queries match the slug.
-3. The `recall-context` hook runs a two-pass merge — strict (tag filter) + loose
-   (slug as query) — and dedups by id, so older untagged facts are still surfaced.
+**Slug derivation** (`deriveProjectSlug`, the single source of truth in `summarize.ts`)
+recognizes both layouts, returning the immediate child of the projects dir:
 
-To retag historical data after a deploy, run `bun run src/backfill-project-tags.ts`.
-Project-less callers stay global — back-compatible with everything that doesn't
-pass a project slug.
+- `/orchestrator/projects/<slug>/...` (server layout)
+- `~/Projects/<slug>/...` (home layout, e.g. macOS)
+
+**At write time**, facts extracted by session summarization are tagged
+`project:<slug>` (derived from `session.metadata.cwd`) and their content is prefixed
+with `[<slug>]` so FTS/semantic queries match the slug too.
+
+**At recall time**, scoping has two distinct modes — a deliberate intent split:
+
+| Caller passes | Mode | Behavior |
+|---------------|------|----------|
+| `?project=` / `X-Project` header | **Hard filter** (`tags`) | Tag-scoped or nothing. Used by the resume-session skill — a deliberate "show me only this project." |
+| `X-Cwd` header | **Soft boost** (`boostTags`) | Same-project facts get a large additive score bump (`+0.5`) and rank first, but other projects still surface — so a sparse/new project never returns an empty recall. Used for ambient per-prompt recall. |
+
+The IRA recall hook (`IraRecall`) sends `X-Cwd`, over-fetches, and shows the top
+results — so the current repo's facts float up automatically. Project-less callers
+stay global (back-compatible).
+
+To tag historical data after a deploy or a layout change, run the backfill (see below).
 
 ## Migration from File-Based Memory
 
