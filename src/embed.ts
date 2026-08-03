@@ -13,10 +13,61 @@ export async function generateEmbedding(text: string): Promise<number[]> {
   if (!embeddingsEnabled || !openai) return [];
   const response = await openai.embeddings.create({
     model: EMBED_MODEL,
-    input: text.slice(0, 8000), // Truncate to avoid token limits
+    input: text.slice(0, CHUNK_CHARS),
     ...(EMBED_SUPPORTS_DIMENSIONS ? { dimensions: EMBED_DIMS } : {}),
   });
   return response.data[0].embedding;
+}
+
+/**
+ * Chunk size in characters. Comfortably inside every provider's input limit — measured, 40k chars
+ * of English is ~4.6k tokens against text-embedding-3-small's 8,191 — but the binding constraint
+ * is semantic, not technical: one vector averages everything it covers, so an oversized chunk
+ * produces a blurred embedding that matches everything weakly and nothing strongly.
+ */
+const CHUNK_CHARS = Number(process.env.IRA_CHUNK_CHARS ?? 6000);
+
+/**
+ * Overlap between adjacent chunks. Without it, a concept that straddles a boundary is split across
+ * two vectors and matches neither well.
+ */
+const CHUNK_OVERLAP = Number(process.env.IRA_CHUNK_OVERLAP ?? 400);
+
+/**
+ * Split text for embedding, preferring natural boundaries so chunks stay locally coherent:
+ * paragraph break first, then sentence end, then whitespace, and only mid-word as a last resort.
+ * Returns a single element for anything already within CHUNK_CHARS — the common case.
+ */
+export function chunkText(text: string): string[] {
+  if (text.length <= CHUNK_CHARS) return [text];
+
+  const chunks: string[] = [];
+  let start = 0;
+
+  while (start < text.length) {
+    const hardEnd = Math.min(start + CHUNK_CHARS, text.length);
+    if (hardEnd === text.length) {
+      chunks.push(text.slice(start));
+      break;
+    }
+
+    // Look for a boundary in the last quarter of the window — searching the whole window would
+    // let a very early break produce a tiny chunk.
+    const windowStart = start + Math.floor(CHUNK_CHARS * 0.75);
+    const candidates = [
+      text.lastIndexOf("\n\n", hardEnd),
+      text.lastIndexOf(". ", hardEnd),
+      text.lastIndexOf("\n", hardEnd),
+      text.lastIndexOf(" ", hardEnd),
+    ].filter((i) => i > windowStart);
+
+    const end = candidates.length ? Math.max(...candidates) : hardEnd;
+    chunks.push(text.slice(start, end).trim());
+    // Never let overlap exceed forward progress, or this loops forever on pathological input.
+    start = Math.max(end - CHUNK_OVERLAP, start + 1);
+  }
+
+  return chunks.filter((c) => c.length > 0);
 }
 
 /**
@@ -36,16 +87,20 @@ export async function embedMessage(messageId: string): Promise<boolean> {
     `;
     if (existing.length > 0) return false;
 
-    const vector = await generateEmbedding(message.content);
-    if (!vector.length) return false; // embeddings disabled — nothing to store
-    const vectorStr = `[${vector.join(",")}]`;
-
-    await prisma.$executeRaw`
-      INSERT INTO message_embeddings (id, message_id, vector, model, created_at)
-      VALUES (${crypto.randomUUID()}, ${messageId}, ${vectorStr}::vector, ${EMBED_MODEL}, NOW())
-      ON CONFLICT (message_id) DO NOTHING
-    `;
-    return true;
+    const chunks = chunkText(message.content);
+    let stored = 0;
+    for (const [i, chunk] of chunks.entries()) {
+      const vector = await generateEmbedding(chunk);
+      if (!vector.length) return false; // embeddings disabled — nothing to store
+      const vectorStr = `[${vector.join(",")}]`;
+      await prisma.$executeRaw`
+        INSERT INTO message_embeddings (id, message_id, vector, model, chunk_index, chunk_total, created_at)
+        VALUES (${crypto.randomUUID()}, ${messageId}, ${vectorStr}::vector, ${EMBED_MODEL}, ${i}, ${chunks.length}, NOW())
+        ON CONFLICT (message_id, chunk_index) DO NOTHING
+      `;
+      stored++;
+    }
+    return stored > 0;
   } catch (err) {
     // Embedding failures must NOT block message storage (ISC-A-1)
     console.error(`[embed] Failed to embed message ${messageId}:`, err);
@@ -66,16 +121,20 @@ export async function embedFact(factId: string): Promise<boolean> {
     `;
     if (existing.length > 0) return false;
 
-    const vector = await generateEmbedding(fact.content);
-    if (!vector.length) return false; // embeddings disabled — nothing to store
-    const vectorStr = `[${vector.join(",")}]`;
-
-    await prisma.$executeRaw`
-      INSERT INTO fact_embeddings (id, fact_id, vector, model, created_at)
-      VALUES (${crypto.randomUUID()}, ${factId}, ${vectorStr}::vector, ${EMBED_MODEL}, NOW())
-      ON CONFLICT (fact_id) DO NOTHING
-    `;
-    return true;
+    const chunks = chunkText(fact.content);
+    let stored = 0;
+    for (const [i, chunk] of chunks.entries()) {
+      const vector = await generateEmbedding(chunk);
+      if (!vector.length) return false; // embeddings disabled — nothing to store
+      const vectorStr = `[${vector.join(",")}]`;
+      await prisma.$executeRaw`
+        INSERT INTO fact_embeddings (id, fact_id, vector, model, chunk_index, chunk_total, created_at)
+        VALUES (${crypto.randomUUID()}, ${factId}, ${vectorStr}::vector, ${EMBED_MODEL}, ${i}, ${chunks.length}, NOW())
+        ON CONFLICT (fact_id, chunk_index) DO NOTHING
+      `;
+      stored++;
+    }
+    return stored > 0;
   } catch (err) {
     console.error(`[embed] Failed to embed fact ${factId}:`, err);
     return false;
@@ -100,9 +159,9 @@ export async function embedSummary(summaryId: string): Promise<boolean> {
     const vectorStr = `[${vector.join(",")}]`;
 
     await prisma.$executeRaw`
-      INSERT INTO summary_embeddings (id, summary_id, vector, model, created_at)
-      VALUES (${crypto.randomUUID()}, ${summaryId}, ${vectorStr}::vector, ${EMBED_MODEL}, NOW())
-      ON CONFLICT (summary_id) DO NOTHING
+      INSERT INTO summary_embeddings (id, summary_id, vector, model, chunk_index, chunk_total, created_at)
+      VALUES (${crypto.randomUUID()}, ${summaryId}, ${vectorStr}::vector, ${EMBED_MODEL}, 0, 1, NOW())
+      ON CONFLICT (summary_id, chunk_index) DO NOTHING
     `;
     return true;
   } catch (err) {

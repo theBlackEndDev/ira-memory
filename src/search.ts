@@ -37,11 +37,22 @@ export async function semanticSearch(
     const rawFacts = await prisma.$queryRaw<
       Array<{ fact_id: string; similarity: number }>
     >`
-      SELECT fe.fact_id, 1 - (fe.vector <=> ${vectorStr}::vector) as similarity
-      FROM fact_embeddings fe
-      JOIN memory_facts mf ON mf.id = fe.fact_id
-      WHERE mf.is_archived = false
-        AND 1 - (fe.vector <=> ${vectorStr}::vector) > ${threshold}
+      -- Chunked embeddings mean one parent can have many rows. Collapse to the best-matching
+      -- chunk per parent, or a single long document would occupy every slot in the result with
+      -- its own fragments and crowd out everything else.
+      -- Inner query keeps the ORDER BY <=> ... LIMIT shape so the HNSW index stays usable;
+      -- over-fetching gives the outer GROUP BY enough rows to still fill the limit after collapsing.
+      SELECT fact_id, MAX(similarity) AS similarity
+      FROM (
+        SELECT fe.fact_id, 1 - (fe.vector <=> ${vectorStr}::vector) AS similarity
+        FROM fact_embeddings fe
+        JOIN memory_facts mf ON mf.id = fe.fact_id
+        WHERE mf.is_archived = false
+        ORDER BY fe.vector <=> ${vectorStr}::vector
+        LIMIT ${limit * 4}
+      ) t
+      WHERE similarity > ${threshold}
+      GROUP BY fact_id
       ORDER BY similarity DESC
       LIMIT ${limit}
     `;
@@ -61,9 +72,15 @@ export async function semanticSearch(
     const rawSummaries = await prisma.$queryRaw<
       Array<{ summary_id: string; similarity: number }>
     >`
-      SELECT se.summary_id, 1 - (se.vector <=> ${vectorStr}::vector) as similarity
-      FROM summary_embeddings se
-      WHERE 1 - (se.vector <=> ${vectorStr}::vector) > ${threshold}
+      SELECT summary_id, MAX(similarity) AS similarity
+      FROM (
+        SELECT se.summary_id, 1 - (se.vector <=> ${vectorStr}::vector) AS similarity
+        FROM summary_embeddings se
+        ORDER BY se.vector <=> ${vectorStr}::vector
+        LIMIT ${limit * 4}
+      ) t
+      WHERE similarity > ${threshold}
+      GROUP BY summary_id
       ORDER BY similarity DESC
       LIMIT ${limit}
     `;
@@ -84,20 +101,33 @@ export async function semanticSearch(
 
     if (input.channel) {
       rawMessages = await prisma.$queryRaw`
-        SELECT me.message_id, 1 - (me.vector <=> ${vectorStr}::vector) as similarity
-        FROM message_embeddings me
-        JOIN messages m ON m.id = me.message_id
-        JOIN sessions s ON s.id = m.session_id
-        WHERE 1 - (me.vector <=> ${vectorStr}::vector) > ${threshold}
-          AND s.channel = ${input.channel}
+        -- Collapse chunk rows to the best chunk per message (see the facts query above).
+        SELECT message_id, MAX(similarity) AS similarity
+        FROM (
+          SELECT me.message_id, 1 - (me.vector <=> ${vectorStr}::vector) AS similarity
+          FROM message_embeddings me
+          JOIN messages m ON m.id = me.message_id
+          JOIN sessions s ON s.id = m.session_id
+          WHERE s.channel = ${input.channel}
+          ORDER BY me.vector <=> ${vectorStr}::vector
+          LIMIT ${limit * 4}
+        ) t
+        WHERE similarity > ${threshold}
+        GROUP BY message_id
         ORDER BY similarity DESC
         LIMIT ${limit}
       `;
     } else {
       rawMessages = await prisma.$queryRaw`
-        SELECT me.message_id, 1 - (me.vector <=> ${vectorStr}::vector) as similarity
-        FROM message_embeddings me
-        WHERE 1 - (me.vector <=> ${vectorStr}::vector) > ${threshold}
+        SELECT message_id, MAX(similarity) AS similarity
+        FROM (
+          SELECT me.message_id, 1 - (me.vector <=> ${vectorStr}::vector) AS similarity
+          FROM message_embeddings me
+          ORDER BY me.vector <=> ${vectorStr}::vector
+          LIMIT ${limit * 4}
+        ) t
+        WHERE similarity > ${threshold}
+        GROUP BY message_id
         ORDER BY similarity DESC
         LIMIT ${limit}
       `;
