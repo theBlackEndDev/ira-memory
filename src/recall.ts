@@ -90,22 +90,31 @@ export async function recall(input: RecallInput): Promise<RecallResult> {
     }
   }
 
-  // Layer 4: Semantic search if query provided and we have few results
-  let semanticFactIds = new Set<string>();
-  if (input.query && facts.length < limit) {
+  // Layer 4: Semantic search whenever a query is provided.
+  //
+  // This used to be gated on `facts.length < limit`, which made it dead code: the structured
+  // layer above always fetches `take: limit` most-recent facts regardless of the query, so the
+  // pool was already full and semantic search never ran for anyone with >= `limit` facts.
+  // Recall silently degraded to "recent facts + FTS keyword matches" — a synonym query that
+  // shared no keywords with a stored fact could never retrieve it.
+  //
+  // Similarity is kept per-fact (not just membership) so scoring can grade a strong match above
+  // a borderline one instead of treating every hit above the threshold as equally relevant.
+  const semanticSimilarity = new Map<string, number>();
+  if (input.query) {
     try {
       const semanticResults = await semanticSearch({
         query: input.query,
         tables: ["facts", "summaries"],
-        limit: limit - facts.length,
+        limit,
         threshold: 0.3,
       });
 
       const existingIds = new Set(facts.map((f) => f.id));
       for (const sf of semanticResults.facts) {
+        semanticSimilarity.set(sf.id, sf.similarity);
         if (!existingIds.has(sf.id)) {
           facts.push(sf);
-          semanticFactIds.add(sf.id);
         }
       }
 
@@ -127,7 +136,24 @@ export async function recall(input: RecallInput): Promise<RecallResult> {
     const recency = 1.0 / (1.0 + daysAgo * 0.1);
     const tierWeight =
       fact.tier === "LONG_TERM" ? 1.0 : fact.tier === "DAILY" ? 0.6 : 0.3;
-    const relevance = ftsFactIds.has(fact.id) ? 1.0 : semanticFactIds.has(fact.id) ? 0.8 : 0.5;
+    // Relevance to the query, in [0,1].
+    //
+    // The unmatched floor is conditional: with no query, every fact is trivially "unmatched"
+    // and 0.5 is the right neutral baseline (recall degenerates to a recency-ranked browse).
+    // With a query, that same 0.5 floor was enough for a *recent but irrelevant* fact to
+    // outrank a genuine older match — worth half of a perfect match purely for existing — so
+    // unmatched facts drop to 0.15 and stay only as fallback filler.
+    //
+    // Semantic hits are graded by cosine similarity rather than a flat weight, mapping the
+    // 0.3 threshold..1.0 range onto 0.6..0.95 so they slot below an exact FTS hit but above
+    // anything unmatched, ordered among themselves by actual semantic strength.
+    const sim = semanticSimilarity.get(fact.id);
+    const unmatched = input.query ? 0.15 : 0.5;
+    const relevance = ftsFactIds.has(fact.id)
+      ? 1.0
+      : sim !== undefined
+        ? 0.6 + 0.35 * Math.min(1, Math.max(0, (sim - 0.3) / 0.7))
+        : unmatched;
 
     // Soft project boost: a large additive bump (not a filter) so same-project facts rank
     // above similarly-relevant other-project ones, while other projects still surface if the
