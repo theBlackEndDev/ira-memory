@@ -28,6 +28,8 @@ export interface StoreMessageInput {
   toolName?: string;
   toolInput?: unknown;
   toolOutput?: unknown;
+  /** Skip the automatic async embed for this row (plan Phase 4: tool results are never embedded). Default false. */
+  skipEmbed?: boolean;
   tokenCount?: number;
   model?: string;
   costUsd?: number;
@@ -234,4 +236,41 @@ export interface SynthesizeResult {
   sourceSummaries: Array<{ id: string; content: string; score: number }>;
   savedFact?: MemoryFact;
   confidence: number;
+}
+
+// ─── Recall messages (Phase 5: pi-ira-memory-capture.md) ────────────
+
+export interface RecallMessagesInput {
+  query: string;
+  /** Session metadata.project value (pi sessions only carry this). */
+  project?: string;
+  channel?: string;
+  limit?: number;
+}
+
+export interface RecallMessagesResult {
+  messages: Array<Message & { score: number; channel: string | null }>;
+}
+
+// ─── Decisions extraction (Phase 6: pi-ira-memory-capture.md) ────────
+
+export interface ExtractDecisionsInput {
+  sessionId: string;
+  /** Raw project slug (no "project:" prefix), used for the fact's project tag. */
+  project?: string;
+  minConfidence?: number;
+  dedup?: boolean;
+}
+
+export interface ExtractedDecision {
+  fact: MemoryFact;
+  confidence: number;
+  reasoning: string;
+}
+
+export interface ExtractDecisionsResult {
+  sessionId: string;
+  decisions: ExtractedDecision[];
+  skipped: number;
+  totalExtracted: number;
 }

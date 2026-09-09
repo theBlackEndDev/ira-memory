@@ -10,6 +10,7 @@
     "db:push": "bunx prisma db push",
     "db:generate": "bunx prisma generate",
     "db:studio": "bunx prisma studio",
+    "redact-rescan": "bun run src/redact-rescan.ts",
     "test": "bun test"
   },
   "dependencies": {

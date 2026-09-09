@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "./client.js";
 import { semanticSearch } from "./search.js";
+import { generateEmbedding } from "./embed.js";
 import type {
   RecallInput,
   RecallResult,
@@ -10,6 +11,8 @@ import type {
   MemoryFact,
   Summary,
   Message,
+  RecallMessagesInput,
+  RecallMessagesResult,
 } from "./types.js";
 
 /**
@@ -268,6 +271,98 @@ export async function recall(input: RecallInput): Promise<RecallResult> {
     summaries: scoredSummaries.slice(0, limit),
     messages,
   };
+}
+
+// ─── Recall over messages (Phase 5: GET /conversation/recall) ───
+//
+// Deliberately separate from `recall()` above rather than folding messages
+// into it: `recall()`'s candidate pool, scoring weights, and tag-filter
+// contract are all fact-shaped (tier, confidence, isArchived) and already
+// covered by callers/tests. Messages have none of that — they have a
+// project/channel scope instead — so this mirrors the same two-layer
+// FTS + semantic pattern deliberately, rather than overloading one function
+// with two different candidate shapes.
+
+const MESSAGE_FTS_CEILING = Number(process.env.IRA_FTS_CEILING ?? 0.55);
+
+export async function recallMessages(input: RecallMessagesInput): Promise<RecallMessagesResult> {
+  const limit = Math.min(input.limit ?? 20, 100);
+  const candidateTake = Math.min(limit * 6, 200);
+
+  const projectFilter = input.project ? Prisma.sql`AND s.metadata->>'project' = ${input.project}` : Prisma.empty;
+  const channelFilter = input.channel ? Prisma.sql`AND s.channel = ${input.channel}` : Prisma.empty;
+
+  const tsQuery = input.query
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => w.replace(/[^\w]/g, ""))
+    .filter(Boolean)
+    .join(" | "); // OR semantics — see recall()'s note above on why AND silently no-ops on natural phrases.
+
+  const ftsRank = new Map<string, number>();
+  if (tsQuery) {
+    const rows = await prisma.$queryRaw<Array<{ id: string; rank: number }>>`
+      SELECT m.id, ts_rank(m.content_tsv, to_tsquery('english', ${tsQuery}), 1) as rank
+      FROM messages m
+      JOIN sessions s ON s.id = m.session_id
+      WHERE m.content_tsv @@ to_tsquery('english', ${tsQuery})
+        ${projectFilter} ${channelFilter}
+      ORDER BY rank DESC
+      LIMIT ${candidateTake}
+    `;
+    const maxRank = Math.max(...rows.map((r) => Number(r.rank) || 0), 0);
+    if (maxRank > 0) rows.forEach((r) => ftsRank.set(r.id, (Number(r.rank) || 0) / maxRank));
+  }
+
+  const semSim = new Map<string, number>();
+  if (process.env.IRA_SEMANTIC_RECALL !== "0") {
+    try {
+      const queryVector = await generateEmbedding(input.query);
+      if (queryVector.length) {
+        const vectorStr = `[${queryVector.join(",")}]`;
+        const rows = await prisma.$queryRaw<Array<{ message_id: string; similarity: number }>>`
+          SELECT message_id, MAX(similarity) AS similarity FROM (
+            SELECT me.message_id, 1 - (me.vector <=> ${vectorStr}::vector) AS similarity
+            FROM message_embeddings me
+            JOIN messages m ON m.id = me.message_id
+            JOIN sessions s ON s.id = m.session_id
+            WHERE 1=1 ${projectFilter} ${channelFilter}
+            ORDER BY me.vector <=> ${vectorStr}::vector
+            LIMIT ${candidateTake}
+          ) t
+          WHERE similarity > 0.3
+          GROUP BY message_id
+          ORDER BY similarity DESC
+          LIMIT ${candidateTake}
+        `;
+        rows.forEach((r) => semSim.set(r.message_id, Number(r.similarity) || 0));
+      }
+    } catch {
+      // Semantic layer failure (e.g. embeddings disabled/API down) is non-fatal — FTS still applies.
+    }
+  }
+
+  const allIds = Array.from(new Set([...ftsRank.keys(), ...semSim.keys()]));
+  if (allIds.length === 0) return { messages: [] };
+
+  const rows = await prisma.message.findMany({
+    where: { id: { in: allIds } },
+    include: { session: { select: { channel: true } } },
+  });
+
+  const now = Date.now();
+  const scored = rows.map((m) => {
+    const daysAgo = (now - m.createdAt.getTime()) / (1000 * 60 * 60 * 24);
+    const recency = 1.0 / (1.0 + daysAgo * 0.1);
+    const ftsScore = ftsRank.has(m.id) ? MESSAGE_FTS_CEILING * (0.4 + 0.6 * (ftsRank.get(m.id) ?? 0)) : 0;
+    const relevance = Math.max(ftsScore, semSim.get(m.id) ?? 0);
+    const score = 0.25 * recency + 0.75 * relevance;
+    const { session, ...rest } = m as typeof m & { session: { channel: string } | null };
+    return { ...rest, channel: session?.channel ?? null, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+
+  return { messages: scored.slice(0, limit) };
 }
 
 // ─── Full-text search ───────────────────────────────────────────

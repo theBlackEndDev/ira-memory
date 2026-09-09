@@ -9,8 +9,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { prisma } from "./client.js";
 import { store, storeMessage, openSession, forget } from "./store.js";
-import { recall, textSearch, listFacts } from "./recall.js";
+import { recall, textSearch, listFacts, recallMessages } from "./recall.js";
 import { deriveProjectSlug } from "./summarize.js";
+import { importPiSession, isSessionFileAllowed } from "./pi-capture.js";
 import type { MemoryCategory } from "./types.js";
 
 const PORT = Number(process.env.MEMORY_API_PORT ?? 7775);
@@ -200,6 +201,63 @@ async function handle(req: Request): Promise<Response> {
           })
         : [];
       return json({ messages: withSession.map(serializeMessage) });
+    }
+
+    // Hybrid FTS + vector recall over raw messages (plan Phase 5, §3.5.1).
+    // Distinct from /conversation/search (FTS only) and /conversation/recent
+    // (unfiltered-by-relevance) — this is what memory_search (the pi
+    // extension's LLM-callable tool) actually calls.
+    if (pathname === "/conversation/recall" && method === "GET") {
+      const q = url.searchParams.get("q");
+      if (!q) return err("q required");
+      const limit = Math.min(Number(url.searchParams.get("limit") ?? 20), 100);
+      const project = resolveProject(req, url) ?? undefined;
+      const channel = url.searchParams.get("channel") ?? undefined;
+      const result = await recallMessages({ query: q, project, channel, limit });
+      return json({ messages: result.messages.map((m) => ({ ...serializeMessage(m), score: m.score })) });
+    }
+
+    // Fetch one message in full — the "expand" half of memory_search's
+    // truncated-matches-then-expand(id) design (plan D10).
+    const messageMatch = pathname.match(/^\/conversation\/message\/(.+)$/);
+    if (messageMatch && method === "GET") {
+      const id = decodeURIComponent(messageMatch[1]);
+      const message = await prisma.message.findUnique({
+        where: { id },
+        include: { session: { select: { channel: true } } },
+      });
+      if (!message) return err("not found", 404);
+      return json(serializeMessage(message));
+    }
+
+    // Pi session capture (plan: pi-ira-memory-capture.md §3.2B). The pi
+    // memory extension sends a file path, never message content — this
+    // endpoint reads the JSONL itself. Returns 202 immediately; import runs
+    // async so a slow/large session sync never holds up the 800ms client
+    // timeout in the extension's client.ts.
+    if (pathname === "/session/sync" && method === "POST") {
+      const body = await parseJson(req);
+      if (!body?.sessionFile || typeof body.sessionFile !== "string") {
+        return err("sessionFile required");
+      }
+      // Trust boundary: this handler reads an arbitrary path off the
+      // filesystem on request. Only pi's own session directory is allowed.
+      if (!isSessionFileAllowed(body.sessionFile)) {
+        return err("sessionFile must be under ~/.pi/agent/sessions/", 403);
+      }
+      importPiSession({
+        sessionFile: body.sessionFile,
+        sessionId: typeof body.sessionId === "string" ? body.sessionId : undefined,
+        cwd: typeof body.cwd === "string" ? body.cwd : undefined,
+        final: body.final === true,
+      })
+        .then((result) => {
+          console.log(`[session/sync] ${body.sessionFile}:`, result);
+        })
+        .catch((e) => {
+          console.error(`[session/sync] failed for ${body.sessionFile}:`, e);
+        });
+      return json({ accepted: true }, 202);
     }
 
     // ── Memory facts ──

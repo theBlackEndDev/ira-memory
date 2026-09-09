@@ -88,8 +88,11 @@ export async function storeMessage(input: StoreMessageInput): Promise<Message> {
     },
   });
 
-  // Async embed (non-blocking)
-  embedMessageAsync(message.id);
+  // Async embed (non-blocking). Skipped for rows the caller marks
+  // skipEmbed (plan Phase 4: tool results/calls are never embedded — they're
+  // either structured columns or too noisy to be useful semantic-search
+  // signal, and embedding them would drown real conversation text in recall).
+  if (!input.skipEmbed) embedMessageAsync(message.id);
 
   return message;
 }

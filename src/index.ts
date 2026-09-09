@@ -13,7 +13,7 @@ export {
 } from "./store.js";
 
 // Recall & search
-export { recall, textSearch, listFacts } from "./recall.js";
+export { recall, textSearch, listFacts, recallMessages } from "./recall.js";
 export { semanticSearch } from "./search.js";
 
 // Embeddings
@@ -37,6 +37,7 @@ export { summarize } from "./summarize.js";
 export { learn } from "./learn.js";
 export { discover } from "./discover.js";
 export { synthesize } from "./synthesize.js";
+export { extractDecisions } from "./decisions.js";
 
 // Maintenance
 export { promoteAndExpire, detectConflicts, compactMessages } from "./maintain.js";
@@ -82,6 +83,10 @@ export type {
   DiscoverAspect,
   SynthesizeInput,
   SynthesizeResult,
+  RecallMessagesInput,
+  RecallMessagesResult,
+  ExtractDecisionsInput,
+  ExtractDecisionsResult,
   MemoryCategory,
   MemoryTier,
   SummaryScope,

@@ -84,6 +84,9 @@ bun run memory-api
 | `/entity` | POST | Create entity in sidecar (`name`, `type`, `details`) |
 | `/entity/search` | GET | Search entities (`?q=`) |
 | `/kv/<key>` | GET / PUT / DELETE | Scratch key-value (cron state, flags) |
+| `/session/sync` | POST | Import (or re-import) a **pi** session transcript from disk — `{sessionFile, sessionId?, cwd?, final?}`. Path only, never content; see [pi Session Capture](#pi-session-capture). |
+| `/conversation/recall` | GET | Hybrid FTS + semantic recall over raw messages, project/channel scoped (`?q=`, `?project=`, `?channel=`, `?limit=`) |
+| `/conversation/message/<id>` | GET | Fetch one message in full — the "expand" half of a truncated-search-result workflow |
 
 Friday-style memory `type` is mapped to ira-memory categories at the boundary:
 `user → PREFERENCE`, `feedback → LESSON`, `project → PROJECT_STATE`, `reference → CONTEXT`.
@@ -128,6 +131,111 @@ After a Claude Code session ends:
 bun run src/cli.ts stats      # Check message/session counts
 bun run src/cli.ts sessions    # List captured sessions
 ```
+
+## pi Session Capture
+
+Automatically capture full **pi** (`@earendil-works/pi-coding-agent`) sessions — every
+turn, both roles, untruncated — from the transcripts pi already writes to
+`~/.pi/agent/sessions/**/*.jsonl` on every turn. This is the mirror-image of Claude
+Code capture above: same spine (parse → extract → dedup → store), different source
+format and a different trigger (a pi extension posts a file path, not a hook reading a
+finished transcript).
+
+Full design rationale, the incident that motivated it, and every alternative
+considered and rejected: `~/Projects/Plans/pi-ira-memory-capture.md`.
+
+### How it's wired
+
+The pi extension at `~/.pi/agent/extensions/memory/` posts `POST /session/sync` after
+each settled turn (debounced 10s) and once more, awaited, on session shutdown — a
+`{sessionFile, cwd, final}` path, never message content. `src/pi-capture.ts` reads that
+file itself:
+
+- **User + assistant text**, full and untruncated below `IRA_PI_MESSAGE_CAP` (default
+  50 000 chars). `thinking` blocks are dropped — model-dependent, absent on Anthropic,
+  and restated in the visible answer.
+- **Tool calls** → their own row (`role: "assistant"`, `tool_name`/`tool_input` set,
+  content a short searchable marker `→ name(args)`).
+- **Tool results** → their own row (`role: "tool"`, `tool_name`/`tool_output` set),
+  head-capped at `IRA_PI_TOOLRESULT_CAP` (default 2000 chars — p50 tool-result size
+  measured across this codebase's own sessions was 416 chars, so most survive whole).
+  Never embedded — 89% of raw transcript volume is tool output, and embedding it
+  would drown real conversation text in semantic recall.
+- **Idempotent per transcript entry** (`metadata.piEntryId`), so re-syncing a growing
+  file only imports what's new. Off-leaf-path entries (abandoned `/branch` subtrees)
+  are still imported, just tagged `metadata.offPath: true` and excluded from default
+  recall.
+- **Project slug**: same `deriveProjectSlug` as everything else in this file — pi
+  sessions get `metadata.project` set on the session row.
+
+### Redaction
+
+Every pending message's text is redacted **before** `storeMessage` — which is also
+before the async embed call reads the row, so a secret never reaches the embeddings
+API either (`src/redact.ts`). One subprocess call per sync batches every pending
+message's redaction together, not one call per message.
+
+Engine chain, **composed, not waterfalled**:
+
+1. **betterleaks** (`brew install betterleaks`) — BPE rarity + contextual filtering,
+   so it doesn't flag prose that merely mentions a `KEY=value` shape.
+2. **gitleaks** — fallback if betterleaks isn't installed, same finding schema.
+3. **heuristic** (regex, always available, zero dependency) — runs **on top of**
+   whichever CLI engine ran, always, not only as a last resort.
+
+Why composed: verified directly that both betterleaks and gitleaks missed a real
+Anthropic session key sitting in a tool result — both are keyword/context-gated and
+the surrounding code didn't trigger either engine's prefilter. A pure "prefer the
+accurate engine" design treats CLI silence as authoritative, which is backwards: a
+benign line getting an extra `[REDACTED]` placeholder is recoverable (pi's JSONL on
+disk is never modified — re-import fixes it), a real secret silently surviving in
+Postgres is not. `metadata.redactionEngine` records which tier(s) actually redacted
+each row (`betterleaks`, `gitleaks`, `heuristic`, or `betterleaks+heuristic` /
+`gitleaks+heuristic` when both contributed).
+
+If the engine chain improves later, existing rows don't retroactively benefit —
+redaction only runs at import time. Re-scan everything already stored:
+
+```bash
+bun run redact-rescan            # updates any row whose content changes under the current chain
+bun run redact-rescan -- --dry-run
+```
+
+### Retrieval
+
+- `GET /conversation/recall?q=&project=&limit=` — hybrid FTS + pgvector over raw
+  messages, scoped by `metadata.project` and/or `channel`. This is what the pi
+  extension's `memory_search` LLM tool calls.
+- `GET /conversation/message/<id>` — fetch one message in full; the "expand" half of
+  a truncated-search-result-then-expand workflow.
+- **Session summaries** run inline on session close (`closeSession(id, {summarize:
+  true})`) — safe here because this is a long-lived server process, unlike Claude
+  Code's SessionEnd hook subprocess, which cc-capture.ts deliberately skips
+  summarizing to avoid a 5-10s OpenAI call getting killed mid-flight.
+- **Catch-all topic tags**: pi sessions whose cwd resolves to the bare `~/Projects`
+  root (no specific project — a deliberate catch-all, not a bug) get a companion fact
+  tagged `project:Projects` + `pi:session-topic` + `topic:<x>` per generated summary
+  topic, so that bucket stays searchable by subject instead of only by date.
+
+### Decisions extraction
+
+`src/decisions.ts` — a session-close LLM pass distinct from `learn()`'s
+MISTAKE/BEST_PRACTICE taxonomy. Extracts **locked decisions** specifically: what was
+decided and why, filtered for explicit lock language ("locked", "decided", "let's go
+with X") versus open questions or rejected options. Stored as `category: DECISION`,
+`tier: LONG_TERM` (a locked decision shouldn't decay through the `SHORT_TERM` 48h
+promotion path the way a passing preference does), tagged `["decision",
+"project:<slug>"]`. Deduped against existing decisions (not the whole fact corpus) via
+semantic similarity, so restating a decision in a later session doesn't spam a
+duplicate row.
+
+The pi extension injects the current project's decisions into the system prompt at
+session start, ahead of the handoff (`## Locked decisions for this project`, budget
+~2000 chars). This is the direct fix for the incident that motivated pi capture: an
+audit agent flagged nine already-settled decisions as open, because nothing in memory
+distinguished LOCKED from merely-discussed. Verified end to end — a fresh agent given
+only this injection correctly listed a previously-contested item as settled and cited
+its source, rather than re-flagging it.
 
 ## LLM provider — running without OpenAI
 
@@ -176,6 +284,9 @@ All config lives in `.env`:
 | `IRA_BACKUP_DIR` | Directory for `backup` / `restore` pg_dump files | `<project>/backups` |
 | `IRA_PROJECT_DIR` | Override project root for `scripts/cron-maintain.sh` | auto-resolved |
 | `IRA_LOG_DIR` | Override log directory for `scripts/cron-maintain.sh` | `<project>/logs` |
+| `IRA_PI_MESSAGE_CAP` | pi capture: user/assistant text cap (chars) | `50000` |
+| `IRA_PI_TOOLRESULT_CAP` | pi capture: tool-call args / tool-result content cap (chars) | `2000` |
+| `IRA_DECISIONS_CONVO_CAP` | Decisions extraction: conversation window sent to the LLM (chars) — larger than summarize.ts/learn.ts's 12000 on purpose, since locked decisions tend to show up late in a long session | `60000` |
 
 The database runs as `ira-memory-db` via the local `docker-compose.yml` on port **5433** (not 5432, to avoid conflicts with other Postgres instances).
 
@@ -379,13 +490,21 @@ ira-memory/
 │   ├── cli.ts                       CLI interface
 │   ├── cc-capture.ts                Claude Code SessionEnd hook (write-only fast path)
 │   ├── hook-bridge.ts               Subcommand router for Claude Code hooks (recall-context is project-aware)
+│   ├── pi-capture.ts                pi session transcript importer — user/assistant/tool rows, batched redaction, idempotent (see pi Session Capture)
+│   ├── redact.ts                    Redaction engine chain: betterleaks → gitleaks → heuristic, composed not waterfalled
+│   ├── redact-rescan.ts             Re-redact everything already stored, for when the engine chain improves
+│   ├── decisions.ts                 LLM pass extracting LOCKED decisions (distinct from learn.ts's lesson taxonomy)
 │   ├── http-server.ts               HTTP Memory API on 127.0.0.1:7775 (Postgres + sqlite sidecar)
 │   ├── learn.ts                     Session ratings + lesson extraction
 │   ├── discover.ts                  Cross-session pattern mining
 │   ├── synthesize.ts                Fact consolidation
 │   ├── backfill-project-tags.ts     Retroactively tag facts with project:<slug>
 │   ├── test-e2e.ts                  End-to-end test suite (28 assertions)
-│   └── test-flow.ts                 Integration smoke test
+│   ├── test-flow.ts                 Integration smoke test
+│   ├── slug.test.ts                 deriveProjectSlug unit tests (pure, no DB) — parity contract with the pi extension's own slug.test.ts
+│   ├── redact.test.ts               Redaction engine chain tests, including the real secret a waterfall design missed
+│   ├── pi-capture.test.ts           pi transcript import: branches, tool calls/results, redaction, idempotency
+│   └── recall.test.ts               recallMessages() regression test, run against real captured session data
 ├── scripts/
 │   └── cron-maintain.sh             Hourly maintain + summarize-pending + embedding backfill
 ├── backups/                         pg_dump backup files (gitignored)
@@ -459,6 +578,18 @@ bun run src/test-flow.ts
 
 # Full E2E test suite (requires running DB + OpenAI key)
 bun run src/test-e2e.ts
+
+# Everything bun test auto-discovers (*.test.ts): slug, redact, pi-capture, recall
+bun test
 ```
 
 The E2E suite tests 28 assertions across all phases: CRUD, embeddings, semantic search, summarization, tier management, sensitive detection, export, and compaction.
+
+The `*.test.ts` files use a plain assert-counter pattern rather than `bun:test`'s
+`test()`/`expect()` API (so `bun test`'s own pass/fail tally reads `0 pass, 0 fail` —
+that's cosmetic; each file prints its own real count). They still need
+`await main()` at module top level, not fire-and-forget — `bun test` moves on once a
+file's module body returns, so an unawaited async `main()` has its output silently
+dropped under `bun test` specifically, even though `bun run src/x.test.ts` runs it
+fine standalone (the process stays alive for the pending promise there). Found this
+the hard way once; if you add a new `*.test.ts` file, keep the `await`.
