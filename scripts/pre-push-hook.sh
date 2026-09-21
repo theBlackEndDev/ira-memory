@@ -62,8 +62,15 @@ scan_range() {
     -e '^\+.*\b(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}' \
     -e '^\+.*\bxox[baprs]-[A-Za-z0-9-]{10,}' \
     -e '^\+.*\bAKIA[A-Z0-9]{16}\b' \
-    -e '^\+.*BEGIN[ A-Z]*PRIVATE KEY' \
     | grep -v '^+++ ')
+
+  # PEM header alone is not a secret — security tests and docs quote the
+  # marker constantly. A real key brings its base64 body with it, so require
+  # both before blocking. gitleaks (layer 1) still sees the bare header case.
+  pem=$(printf '%s\n' "$diff_out" | grep -E '^\+.*BEGIN[ A-Z]*PRIVATE KEY' | grep -v '^+++ ')
+  if [ -n "$pem" ] && printf '%s\n' "$diff_out" | grep -qE '^\+.*[A-Za-z0-9+/=]{40,}'; then
+    hits=$(printf '%s\n%s\n' "$hits" "$pem" | grep -v '^$')
+  fi
 
   if [ -n "$hits" ]; then
     echo "pre-push: BLOCKED — heuristic layer found a secret-shaped string gitleaks missed:"

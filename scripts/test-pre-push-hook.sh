@@ -105,5 +105,28 @@ out=$(printf 'refs/heads/main %s refs/heads/main %s\n' "$sha" "$zero" \
   | (cd "$r" && PATH=/usr/bin:/bin sh "$hook")) 2>&1 && code=0 || code=$?
 check "gitleaks not on PATH -> blocked" 1 "$code" "$out"
 
+# PEM markers are assembled at runtime for the same reason the API key above
+# is: a literal one in this file is a finding in its own right, and gitleaks
+# scanning this repo flagged exactly that. The fixtures below are byte-for-byte
+# what a real key looks like once the shell expands them.
+key_word="KEY"
+pem_begin="-----BEGIN RSA PRIVATE ${key_word}-----"
+pem_end="-----END RSA PRIVATE ${key_word}-----"
+
+# --- 9. PEM header with no key body (test fixture / docs) -> allowed --------
+r=$(mkrepo pem-header-only)
+sha=$(commit "$r" rules.test.ts "expect(names(\"${pem_begin}\")).toContain('cred')" "add test")
+out=$(printf 'refs/heads/main %s refs/heads/main %s\n' "$sha" "$zero" | run_hook "$r") && code=0 || code=$?
+check "PEM header, no key body -> allowed" 0 "$code" "$out"
+
+# --- 10. PEM header with a real base64 body -> blocked ----------------------
+r=$(mkrepo pem-with-body)
+body=$(printf 'MIIEowIBAAKCAQEAwJ8n%s' "$(printf 'x%.0s' $(seq 1 60))")
+sha=$(commit "$r" id_rsa "${pem_begin}
+${body}
+${pem_end}" "oops")
+out=$(printf 'refs/heads/main %s refs/heads/main %s\n' "$sha" "$zero" | run_hook "$r") && code=0 || code=$?
+check "PEM header + base64 body -> blocked" 1 "$code" "$out"
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
